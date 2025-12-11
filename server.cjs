@@ -692,7 +692,7 @@ app.post('/api/create-razorpay-order', async (req, res) => {
     
     // Create REAL Razorpay order
     const options = {
-      amount: amount * 100, // ₹10 in paise
+      amount: amount, // ₹10 in paise
       currency: 'INR',
       receipt: `receipt_${bookingId}`,
       notes: {
