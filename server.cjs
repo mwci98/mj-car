@@ -36,7 +36,7 @@ try {
 }
 
 // MongoDB Atlas Connection
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://mwci98_db_user:jMeYxRFChuKNz4pH@cluster0.zxr1nt1.mongodb.net/car-rental?retryWrites=true&w=majority';
+const MONGODB_URI = process.env.MONGODB_URI 
 
 // Connect to MongoDB
 mongoose.connect(MONGODB_URI)
@@ -2304,3 +2304,4 @@ app.listen(PORT, () => {
   `);
 
 });
+
