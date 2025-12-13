@@ -36,7 +36,7 @@ try {
 }
 
 // MongoDB Atlas Connection
-const MONGODB_URI = process.env.MONGODB_URI 
+const MONGODB_URI = process.env.MONGODB_URI;
 
 // Connect to MongoDB
 mongoose.connect(MONGODB_URI)
@@ -45,8 +45,8 @@ mongoose.connect(MONGODB_URI)
 
 // Razorpay Configuration
 const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_RpuEwhCtUgiscu',
-  key_secret: process.env.RAZORPAY_KEY_SECRET || '2ioiB49UCk1wnZFOGBLrBxhX'
+  key_id: process.env.RAZORPAY_KEY_ID ,
+  key_secret: process.env.RAZORPAY_KEY_SECRET '
 });
 
 // Vehicle Schema
@@ -2304,4 +2304,5 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
