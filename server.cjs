@@ -221,6 +221,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // Get all vehicles
+// Get all vehicles - make sure it includes quantity
 app.get('/api/vehicles', async (req, res) => {
   try {
     const vehicles = await Vehicle.find({ isAvailable: true });
@@ -2360,6 +2361,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
