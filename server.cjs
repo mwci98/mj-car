@@ -56,6 +56,7 @@ const vehicleSchema = new mongoose.Schema({
   capacity: Number,
   transmission: String,
   dailyRate: Number,
+  quantity: { type: Number, default: 1 },
   isAvailable: { type: Boolean, default: true },
   features: [String],
   image: String
@@ -2359,6 +2360,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
