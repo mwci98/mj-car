@@ -876,7 +876,62 @@ app.post('/api/verify-payment', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+/**
+ * Test SMS endpoint
+ */
+app.post('/api/test-sms', async (req, res) => {
+  try {
+    const { phoneNumber, message } = req.body;
+    
+    if (!phoneNumber) {
+      return res.status(400).json({
+        success: false,
+        error: 'Phone number is required'
+      });
+    }
 
+    const testMessage = message || 'Test SMS from MJ Car Rentals - Service is working!';
+    
+    const result = await notificationService.testSMS(phoneNumber, testMessage);
+    
+    res.json({
+      success: result.success,
+      message: result.success ? 'SMS sent successfully' : 'Failed to send SMS',
+      result: result
+    });
+    
+  } catch (error) {
+    console.error('❌ Test SMS error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Check SMS configuration
+ */
+app.get('/api/sms-config', (req, res) => {
+  const config = {
+    smsService: 'Fast2SMS',
+    configured: !!process.env.FAST2SMS_API_KEY,
+    senderId: process.env.FAST2SMS_SENDER_ID || 'FSTSMS',
+    adminPhone: process.env.ADMIN_PHONE ? 'Configured' : 'Not configured',
+    companyPhone: process.env.COMPANY_PHONE || 'Not configured',
+    instructions: {
+      signup: '1. Sign up at https://www.fast2sms.com/',
+      verify: '2. Verify mobile number and get API key',
+      configure: '3. Add FAST2SMS_API_KEY to .env file',
+      test: '4. Use POST /api/test-sms to test'
+    }
+  };
+  
+  res.json({
+    success: true,
+    config: config
+  });
+});
 // Get all bookings
 app.post('/api/bookings', async (req, res) => {
   try {
@@ -2304,5 +2359,6 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
