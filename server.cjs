@@ -1752,7 +1752,173 @@ app.get('/api/admin/bookings', async (req, res) => {
     });
   }
 });
-
+/**
+ * Create manual booking (for admin panel)
+ */
+app.post('/api/admin/bookings/manual', async (req, res) => {
+  try {
+    console.log('📝 Creating manual booking:', req.body);
+    
+    const {
+      customerName,
+      customerPhone,
+      customerEmail,
+      driverLicense,
+      vehicleId,
+      vehicleName,
+      vehicleType,
+      dailyRate,
+      pickupDate,
+      dropoffDate,
+      pickupTime = '09:00',
+      dropoffTime = '18:00',
+      totalAmount,
+      advanceAmount = 0,
+      paymentMethod = 'cash',
+      paymentStatus = 'pending',
+      notes,
+      // Admin fields
+      createdBy = 'admin',
+      manualBooking = true
+    } = req.body;
+    
+    // Validate required fields
+    if (!customerName || !customerPhone || !vehicleId || !vehicleName || !pickupDate || !dropoffDate) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: customerName, customerPhone, vehicleName, pickupDate, dropoffDate'
+      });
+    }
+    
+    // Check if vehicle exists
+    const vehicle = await Vehicle.findById(vehicleId);
+    if (!vehicle) {
+      return res.status(404).json({
+        success: false,
+        error: 'Vehicle not found'
+      });
+    }
+    
+    // Parse dates
+    const startDate = new Date(pickupDate);
+    const endDate = new Date(dropoffDate);
+    
+    // Validate dates
+    if (startDate >= endDate) {
+      return res.status(400).json({
+        success: false,
+        error: 'Drop-off date must be after pick-up date'
+      });
+    }
+    
+    // Check if vehicle is available for the dates
+    const availabilityCheck = await checkVehicleAvailability(vehicleId, startDate, endDate);
+    
+    if (!availabilityCheck.available) {
+      return res.status(400).json({
+        success: false,
+        error: `Vehicle is not available for the selected dates. Only ${availabilityCheck.availableQuantity} of ${vehicle.quantity} available.`,
+        availableQuantity: availabilityCheck.availableQuantity,
+        vehicleQuantity: vehicle.quantity
+      });
+    }
+    
+    // Calculate total days
+    const totalDays = Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24));
+    
+    // Calculate total amount if not provided
+    let calculatedTotalAmount = totalAmount;
+    if (!calculatedTotalAmount && dailyRate) {
+      calculatedTotalAmount = dailyRate * totalDays;
+    } else if (!calculatedTotalAmount) {
+      calculatedTotalAmount = vehicle.dailyRate * totalDays;
+    }
+    
+    // Generate booking ID
+    const bookingId = `MB${Date.now()}${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
+    
+    // Create manual booking
+    const booking = new Booking({
+      bookingId,
+      customerName,
+      customerPhone,
+      customerEmail,
+      driverLicense,
+      vehicleId,
+      vehicleName,
+      vehicleType: vehicleType || vehicle.type,
+      dailyRate: dailyRate || vehicle.dailyRate,
+      pickupDate: startDate,
+      dropoffDate: endDate,
+      pickupTime,
+      dropoffTime,
+      totalDays,
+      rentalAmount: calculatedTotalAmount,
+      totalAmount: calculatedTotalAmount,
+      advanceAmount,
+      paymentMethod,
+      paymentStatus,
+      notes,
+      
+      // Admin fields
+      manualBooking: true,
+      createdBy,
+      status: paymentStatus === 'paid' ? 'confirmed' : 'pending',
+      
+      // Set notifications as manual
+      notificationsSent: false,
+      notificationsStatus: 'pending',
+      
+      // Initialize status history
+      statusHistory: [{
+        status: paymentStatus === 'paid' ? 'confirmed' : 'pending',
+        timestamp: new Date(),
+        actionBy: createdBy,
+        notes: 'Manual booking created'
+      }]
+    });
+    
+    await booking.save();
+    
+    console.log(`✅ Manual booking created: ${bookingId} for ${customerName}`);
+    
+    // Update vehicle availability if needed
+    if (vehicle.quantity === 1 && availabilityCheck.availableQuantity === 0) {
+      await Vehicle.findByIdAndUpdate(vehicleId, {
+        isAvailable: false
+      });
+      console.log(`ℹ️ Vehicle ${vehicle.name} marked as unavailable`);
+    }
+    
+    res.json({
+      success: true,
+      message: 'Manual booking created successfully',
+      bookingId: booking.bookingId,
+      booking: {
+        _id: booking._id,
+        bookingId: booking.bookingId,
+        customerName: booking.customerName,
+        customerPhone: booking.customerPhone,
+        vehicleName: booking.vehicleName,
+        pickupDate: booking.pickupDate,
+        dropoffDate: booking.dropoffDate,
+        totalAmount: booking.totalAmount,
+        paymentStatus: booking.paymentStatus,
+        status: booking.status,
+        createdBy: booking.createdBy,
+        createdAt: booking.createdAt
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error creating manual booking:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
 /**
  * Update booking status (admin actions)
  */
@@ -2361,6 +2527,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
