@@ -1804,6 +1804,94 @@ app.get('/api/admin/bookings', async (req, res) => {
   }
 });
 /**
+ * Admin payment processing endpoint
+ */
+app.post('/api/admin/bookings/:identifier/payment', async (req, res) => {
+  try {
+    const { identifier } = req.params;
+    const { 
+      paymentMethod = 'cash', 
+      paymentAmount, 
+      paymentStatus = 'paid',
+      transactionId,
+      paymentNotes,
+      processedBy = 'admin'
+    } = req.body;
+    
+    // Find booking by bookingId or _id
+    const booking = await findBooking(identifier);
+    
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        error: 'Booking not found'
+      });
+    }
+    
+    // Validate payment amount
+    if (paymentAmount && (paymentAmount > booking.totalAmount || paymentAmount <= 0)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid payment amount. Must be between 0 and ${booking.totalAmount}`
+      });
+    }
+    
+    // Update payment details
+    booking.paymentMethod = paymentMethod;
+    booking.paymentAmount = paymentAmount || booking.totalAmount;
+    booking.paymentStatus = paymentStatus;
+    booking.paymentTimestamp = new Date();
+    
+    // Add transaction ID if provided
+    if (transactionId) {
+      booking.razorpayPaymentId = transactionId;
+    }
+    
+    // If payment is completed, update booking status
+    if (paymentStatus === 'paid') {
+      booking.status = 'confirmed';
+      
+      // Add to status history
+      if (!booking.statusHistory) {
+        booking.statusHistory = [];
+      }
+      
+      booking.statusHistory.push({
+        status: 'confirmed',
+        timestamp: new Date(),
+        actionBy: processedBy,
+        notes: paymentNotes || `Payment processed via ${paymentMethod}`
+      });
+      
+      console.log(`✅ Payment processed for booking: ${booking.bookingId} - ${paymentMethod}: ₹${booking.paymentAmount}`);
+    }
+    
+    await booking.save();
+    
+    res.json({
+      success: true,
+      message: `Payment ${paymentStatus} successfully`,
+      booking: {
+        bookingId: booking.bookingId,
+        customerName: booking.customerName,
+        vehicleName: booking.vehicleName,
+        totalAmount: booking.totalAmount,
+        paymentAmount: booking.paymentAmount,
+        paymentMethod: booking.paymentMethod,
+        paymentStatus: booking.paymentStatus,
+        status: booking.status
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error processing payment:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+/**
  * Create manual booking (for admin panel)
  */
 app.post('/api/admin/bookings/manual', async (req, res) => {
@@ -2578,6 +2666,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
