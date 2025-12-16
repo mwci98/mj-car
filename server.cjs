@@ -104,7 +104,7 @@ const bookingSchema = new mongoose.Schema({
   status: { 
     type: String, 
     default: 'pending', 
-    enum: ['pending', 'confirmed', 'handed_over', 'in_use', 'returned', 'completed', 'cancelled', 'overdue'] 
+    enum: [ 'confirmed', 'handed_over', 'in_use', 'returned', 'completed', 'cancelled', 'overdue'] 
   },
   
   // Notification tracking
@@ -234,6 +234,7 @@ app.get('/api/vehicles', async (req, res) => {
 // ==================== AVAILABILITY ENDPOINTS ====================
 
 // Get available vehicles (with optional date filtering)
+// Get available vehicles (with optional date filtering) - UPDATED
 app.get('/api/vehicles/available', async (req, res) => {
   try {
     const { pickupDate, dropoffDate } = req.query;
@@ -253,18 +254,19 @@ app.get('/api/vehicles/available', async (req, res) => {
         });
       }
       
-      // Get bookings that overlap with requested dates
+      // Get ACTIVE bookings that overlap with requested dates
       const overlappingBookings = await Booking.find({
         $or: [
           {
             pickupDate: { $lte: endDate },
             dropoffDate: { $gte: startDate },
+            // ✅ EXCLUDE PENDING bookings
             status: { $in: ['confirmed', 'handed_over', 'in_use'] }
           }
         ]
       });
       
-      // Get booked vehicle IDs
+      // Get booked vehicle IDs (from ACTIVE bookings only)
       const bookedVehicleIds = overlappingBookings.map(booking => 
         booking.vehicleId.toString()
       );
@@ -401,6 +403,7 @@ app.get('/api/vehicles/:vehicleId/availability', async (req, res) => {
   }
 });
 // Get unavailable dates for a vehicle
+// Get unavailable dates for a vehicle - UPDATED VERSION
 app.get('/api/vehicles/:vehicleId/unavailable-dates', async (req, res) => {
   try {
     const { vehicleId } = req.params;
@@ -413,13 +416,19 @@ app.get('/api/vehicles/:vehicleId/unavailable-dates', async (req, res) => {
       });
     }
     
-    // Get confirmed and active bookings
+    // ✅ Get ONLY confirmed and active bookings (EXCLUDE pending)
     const bookings = await Booking.find({
       vehicleId: vehicleId,
-      status: { $in: ['confirmed', 'handed_over', 'in_use'] }
+      status: { $in: ['confirmed', 'handed_over', 'in_use'] } // ❌ REMOVE 'pending'
     }).sort({ pickupDate: 1 });
     
-    // Generate array of all booked dates
+    // Also get pending bookings for information
+    const pendingBookings = await Booking.find({
+      vehicleId: vehicleId,
+      status: 'pending'
+    }).sort({ pickupDate: 1 });
+    
+    // Generate array of all booked dates (ACTIVE ONLY)
     const unavailableDates = [];
     
     bookings.forEach(booking => {
@@ -432,15 +441,31 @@ app.get('/api/vehicles/:vehicleId/unavailable-dates', async (req, res) => {
       }
     });
     
+    // Generate array of pending dates (for information only)
+    const pendingDates = [];
+    
+    pendingBookings.forEach(booking => {
+      const current = new Date(booking.pickupDate);
+      const end = new Date(booking.dropoffDate);
+      
+      while (current <= end) {
+        pendingDates.push(current.toISOString().split('T')[0]);
+        current.setDate(current.getDate() + 1);
+      }
+    });
+    
     // Remove duplicates and sort
     const uniqueDates = [...new Set(unavailableDates)].sort();
+    const uniquePendingDates = [...new Set(pendingDates)].sort();
     
     res.json({
       success: true,
       vehicleId,
       vehicleName: vehicle.name,
-      totalBookings: bookings.length,
-      unavailableDates: uniqueDates,
+      totalActiveBookings: bookings.length,
+      totalPendingBookings: pendingBookings.length,
+      unavailableDates: uniqueDates, // ACTIVE bookings only
+      pendingDates: uniquePendingDates, // For information
       nextAvailableDate: uniqueDates.length > 0 ? 
         new Date(new Date(uniqueDates[uniqueDates.length - 1]).getTime() + 86400000).toISOString().split('T')[0] : 
         new Date().toISOString().split('T')[0]
@@ -540,6 +565,7 @@ app.post('/api/bookings', async (req, res) => {
 });
 
 // Separate function to check vehicle availability
+// Separate function to check vehicle availability - UPDATED VERSION
 async function checkVehicleAvailability(vehicleId, startDate, endDate, excludeBookingId = null) {
   try {
     console.log('=== AVAILABILITY CHECK START ===');
@@ -564,10 +590,13 @@ async function checkVehicleAvailability(vehicleId, startDate, endDate, excludeBo
     const quantity = Number(vehicle.quantity) || 1;
     console.log(`Parsed quantity: ${quantity} (Type: ${typeof quantity})`);
     
-    // Build query for overlapping bookings
+    // ========== IMPORTANT CHANGE HERE ==========
+    // Build query for overlapping bookings - EXCLUDE PENDING BOOKINGS
     const query = {
       vehicleId: vehicleId,
-      status: { $in: ['confirmed', 'pending', 'handed_over', 'in_use', 'overdue'] }
+      // ✅ ONLY count confirmed and active bookings
+      status: { $in: ['confirmed', 'handed_over', 'in_use', 'overdue'] }
+      // ❌ REMOVED: 'pending' from the array
     };
     
     // Date overlap condition - Simplified
@@ -582,14 +611,14 @@ async function checkVehicleAvailability(vehicleId, startDate, endDate, excludeBo
       query._id = { $ne: excludeBookingId };
     }
     
-    console.log('Query:', JSON.stringify(query, null, 2));
+    console.log('Query (pending bookings excluded):', JSON.stringify(query, null, 2));
     
     const overlappingBookings = await Booking.find(query);
-    console.log(`Found ${overlappingBookings.length} overlapping bookings`);
+    console.log(`Found ${overlappingBookings.length} overlapping ACTIVE bookings`);
     
     // If no overlapping bookings, all vehicles are available
     if (overlappingBookings.length === 0) {
-      console.log(`✅ No overlapping bookings. All ${quantity} vehicles available.`);
+      console.log(`✅ No overlapping ACTIVE bookings. All ${quantity} vehicles available.`);
       console.log('=== AVAILABILITY CHECK END ===');
       return {
         available: true,
@@ -599,7 +628,26 @@ async function checkVehicleAvailability(vehicleId, startDate, endDate, excludeBo
       };
     }
     
-    // Calculate day-by-day bookings
+    // Also get pending bookings for informational purposes
+    const pendingBookings = await Booking.find({
+      vehicleId: vehicleId,
+      status: 'pending',
+      $or: [
+        {
+          pickupDate: { $lte: endDate },
+          dropoffDate: { $gte: startDate }
+        }
+      ]
+    });
+    
+    if (pendingBookings.length > 0) {
+      console.log(`📝 Note: Found ${pendingBookings.length} PENDING bookings (not counted in availability)`);
+      pendingBookings.forEach((booking, index) => {
+        console.log(`  Pending ${index + 1}: ${booking.bookingId} - ${booking.customerName}`);
+      });
+    }
+    
+    // Calculate day-by-day bookings (ACTIVE BOOKINGS ONLY)
     const dateBookings = {};
     
     // Initialize all dates in range
@@ -612,9 +660,9 @@ async function checkVehicleAvailability(vehicleId, startDate, endDate, excludeBo
     
     console.log('Date range initialized:', Object.keys(dateBookings).length, 'days');
     
-    // Count bookings for each day
+    // Count ACTIVE bookings for each day
     overlappingBookings.forEach((booking, index) => {
-      console.log(`\nBooking ${index + 1}:`);
+      console.log(`\nActive Booking ${index + 1}:`);
       console.log(`- Booking ID: ${booking.bookingId}`);
       console.log(`- Status: ${booking.status}`);
       console.log(`- Pickup: ${booking.pickupDate}`);
@@ -637,16 +685,17 @@ async function checkVehicleAvailability(vehicleId, startDate, endDate, excludeBo
       }
     });
     
-    console.log('\nDate-wise bookings:', dateBookings);
+    console.log('\nDate-wise ACTIVE bookings:', dateBookings);
     
-    // Find maximum concurrent bookings on any day
+    // Find maximum concurrent ACTIVE bookings on any day
     const bookingCounts = Object.values(dateBookings);
     const maxConcurrentBookings = bookingCounts.length > 0 ? Math.max(...bookingCounts) : 0;
     const availableQuantity = quantity - maxConcurrentBookings;
     
-    console.log(`\nSummary:`);
+    console.log(`\nSummary (PENDING BOOKINGS EXCLUDED):`);
     console.log(`- Vehicle quantity: ${quantity}`);
-    console.log(`- Max concurrent bookings: ${maxConcurrentBookings}`);
+    console.log(`- Max concurrent ACTIVE bookings: ${maxConcurrentBookings}`);
+    console.log(`- Pending bookings not counted: ${pendingBookings.length}`);
     console.log(`- Available quantity: ${availableQuantity}`);
     console.log(`- Is available: ${availableQuantity > 0}`);
     
@@ -658,7 +707,9 @@ async function checkVehicleAvailability(vehicleId, startDate, endDate, excludeBo
       vehicleQuantity: quantity,
       bookedQuantity: maxConcurrentBookings,
       dateBookings: dateBookings,
-      overlappingBookingsCount: overlappingBookings.length
+      overlappingBookingsCount: overlappingBookings.length,
+      pendingBookingsCount: pendingBookings.length, // Add this for info
+      hasPendingConflicts: pendingBookings.length > 0 // Flag for frontend
     };
     
   } catch (error) {
@@ -2527,6 +2578,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
