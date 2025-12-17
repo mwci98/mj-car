@@ -1513,7 +1513,22 @@ app.get('/api/admin/stats', async (req, res) => {
     });
 // In your backend route, replace:
 
-
+ const revenueStats = await Booking.aggregate([
+      {
+        $match: {
+          paymentStatus: 'paid',
+          createdAt: { $gte: monthAgo }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalRevenue: { $sum: '$totalAmount' },
+          avgRevenue: { $avg: '$totalAmount' },
+          count: { $sum: 1 }
+        }
+      }
+    ]);
 // With:
 
 
