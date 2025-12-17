@@ -1702,7 +1702,78 @@ app.post('/api/admin/bookings/:identifier/payment', async (req, res) => {
     });
   }
 });
-
+app.post('/api/admin/bookings/:identifier/handover', async (req, res) => {
+  try {
+    const { identifier } = req.params;
+    const { 
+      odometerReading, 
+      fuelLevel, 
+      conditionNotes,
+      handedOverBy,
+      customerSignature
+    } = req.body;
+    
+    const booking = await findBooking(identifier);
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        error: 'Booking not found'
+      });
+    }
+    
+    // Check if booking can be handed over
+    if (booking.status !== 'confirmed') {
+      return res.status(400).json({
+        success: false,
+        error: `Booking cannot be handed over from status: ${booking.status}`
+      });
+    }
+    
+    // Update booking
+    booking.status = 'handed_over';
+    booking.handoverData = {
+      odometerReading: odometerReading || 0,
+      fuelLevel: fuelLevel || 'full',
+      conditionNotes: conditionNotes || 'Good condition',
+      handedOverBy: handedOverBy || 'admin',
+      customerSignature: customerSignature || 'digital_acceptance',
+      handedOverAt: new Date()
+    };
+    
+    // Add status history
+    if (!booking.statusHistory) {
+      booking.statusHistory = [];
+    }
+    
+    booking.statusHistory.push({
+      status: 'handed_over',
+      timestamp: new Date(),
+      actionBy: handedOverBy || 'admin',
+      notes: 'Vehicle handed over to customer'
+    });
+    
+    await booking.save();
+    
+    res.json({
+      success: true,
+      message: 'Vehicle handed over successfully',
+      booking: {
+        bookingId: booking.bookingId,
+        status: booking.status,
+        customerName: booking.customerName,
+        vehicleName: booking.vehicleName,
+        handoverData: booking.handoverData
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error in vehicle handover:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 // Create manual booking (for admin panel)
 app.post('/api/admin/bookings/manual',  async (req, res) => {
   try {
@@ -1976,6 +2047,7 @@ app.listen(PORT, () => {
     📊 Health Check: GET /api/health
   `);
 });
+
 
 
 
