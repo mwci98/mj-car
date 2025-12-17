@@ -1901,12 +1901,20 @@ app.get('/api/notifications/config', async (req, res) => {
 
 // Admin Login Route
 // Admin Login Route - FIXED VERSION
+// Admin Login Route - SIMPLIFIED FIXED VERSION
 app.post('/api/admin/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body;
-    console.log('🔐 Login attempt:', username, 'Password length:', password?.length);
+    console.log('🔐 Login attempt for:', username);
     
-    // 1. Find admin in database (check both username and email fields)
+    if (!username || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Username and password are required'
+      });
+    }
+    
+    // Find admin user
     const admin = await Admin.findOne({ 
       $or: [
         { username: username.toLowerCase().trim() },
@@ -1915,25 +1923,13 @@ app.post('/api/admin/auth/login', async (req, res) => {
     });
     
     if (!admin) {
-      console.log('❌ Admin not found for:', username);
       return res.status(401).json({
         success: false,
         message: 'Invalid username or email'
       });
     }
     
-    console.log('✅ Admin found:', {
-      id: admin._id,
-      username: admin.username,
-      email: admin.email,
-      is_active: admin.is_active,
-      role: admin.role
-    });
-    
-    console.log('🔑 Password hash in DB (first 30 chars):', admin.password_hash.substring(0, 30) + '...');
-    console.log('🔑 Password hash starts with:', admin.password_hash.substring(0, 7));
-    
-    // 2. Check if account is active
+    // Check if account is active
     if (!admin.is_active) {
       return res.status(401).json({
         success: false,
@@ -1941,54 +1937,23 @@ app.post('/api/admin/auth/login', async (req, res) => {
       });
     }
     
-    // 3. Debug: Check what password we're comparing
-    console.log('🔄 Comparing password...');
-    console.log('Input password:', password ? 'Provided' : 'Missing');
-    console.log('Input password length:', password?.length);
-    console.log('Hash type in DB:', admin.password_hash.substring(0, 3));
-    
-    // IMPORTANT: Ensure bcrypt is loaded correctly
-    const bcrypt = require('bcryptjs');
-    
-    // For debugging: Try to hash a test password to verify bcrypt works
-    const testHash = await bcrypt.hash('test123', 10);
-    console.log('Test bcrypt hash (first 30 chars):', testHash.substring(0, 30) + '...');
-    
-    // Compare password
-    console.log('Starting bcrypt compare...');
+    // Compare password using bcrypt directly (not the schema method)
     const isValidPassword = await bcrypt.compare(password, admin.password_hash);
-    console.log('🔐 Password valid?', isValidPassword);
     
     if (!isValidPassword) {
-      console.log('❌ Password comparison failed for:', username);
-      console.log('This could mean:');
-      console.log('1. Password is incorrect');
-      console.log('2. Hash was created with different salt rounds');
-      console.log('3. Hash was created with different bcrypt version');
-      
-      // Try manual verification for debugging
-      console.log('\n🔍 DEBUG INFO:');
-      console.log('Hash prefix:', admin.password_hash.substring(0, 30));
-      console.log('Expected prefix for bcrypt:', '$2b$');
-      console.log('Hash length:', admin.password_hash.length);
-      
       return res.status(401).json({
         success: false,
         message: 'Invalid password'
       });
     }
     
-    // 4. Update last login
+    // Update last login
     admin.last_login = new Date();
     admin.login_attempts = 0;
     await admin.save();
     
-    // 5. Create JWT token
-    const jwt = require('jsonwebtoken');
+    // Create JWT token
     const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
-    
-    console.log('📝 Creating JWT with secret length:', JWT_SECRET.length);
-    
     const token = jwt.sign(
       { 
         id: admin._id, 
@@ -2000,10 +1965,8 @@ app.post('/api/admin/auth/login', async (req, res) => {
       { expiresIn: '8h' }
     );
     
-    console.log('✅ Login successful! Token created.');
-    console.log('📱 Token (first 50 chars):', token.substring(0, 50) + '...');
+    console.log('✅ Login successful for:', username);
     
-    // 6. Send response matching your frontend expectations
     res.json({
       success: true,
       message: 'Login successful',
@@ -2015,19 +1978,13 @@ app.post('/api/admin/auth/login', async (req, res) => {
         full_name: admin.full_name,
         role: admin.role,
         permissions: admin.permissions || [],
-        phone: admin.phone,
-        last_login: admin.last_login
+        phone: admin.phone
       }
     });
     
   } catch (error) {
     console.error('🔥 Login error:', error.message);
     console.error('Stack:', error.stack);
-    
-    // More detailed error information
-    if (error.name === 'TypeError') {
-      console.error('TypeError details:', error);
-    }
     
     res.status(500).json({ 
       success: false, 
@@ -3218,6 +3175,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
