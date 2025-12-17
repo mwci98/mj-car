@@ -1900,6 +1900,7 @@ app.get('/api/notifications/config', async (req, res) => {
 
 
 // Admin Login Route
+// Admin Login Route - FIXED VERSION
 app.post('/api/admin/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -1921,8 +1922,16 @@ app.post('/api/admin/auth/login', async (req, res) => {
       });
     }
     
-    console.log('✅ Admin found:', admin.username, 'Email:', admin.email);
-    console.log('🔑 Password hash in DB:', admin.password_hash.substring(0, 30) + '...');
+    console.log('✅ Admin found:', {
+      id: admin._id,
+      username: admin.username,
+      email: admin.email,
+      is_active: admin.is_active,
+      role: admin.role
+    });
+    
+    console.log('🔑 Password hash in DB (first 30 chars):', admin.password_hash.substring(0, 30) + '...');
+    console.log('🔑 Password hash starts with:', admin.password_hash.substring(0, 7));
     
     // 2. Check if account is active
     if (!admin.is_active) {
@@ -1932,16 +1941,37 @@ app.post('/api/admin/auth/login', async (req, res) => {
       });
     }
     
-    // 3. IMPORTANT FIX: Your hash uses $2b$ not $2a$
-    // The bcrypt library handles both, but let's verify
+    // 3. Debug: Check what password we're comparing
+    console.log('🔄 Comparing password...');
+    console.log('Input password:', password ? 'Provided' : 'Missing');
+    console.log('Input password length:', password?.length);
+    console.log('Hash type in DB:', admin.password_hash.substring(0, 3));
+    
+    // IMPORTANT: Ensure bcrypt is loaded correctly
     const bcrypt = require('bcryptjs');
     
-    console.log('🔄 Comparing password...');
+    // For debugging: Try to hash a test password to verify bcrypt works
+    const testHash = await bcrypt.hash('test123', 10);
+    console.log('Test bcrypt hash (first 30 chars):', testHash.substring(0, 30) + '...');
+    
+    // Compare password
+    console.log('Starting bcrypt compare...');
     const isValidPassword = await bcrypt.compare(password, admin.password_hash);
     console.log('🔐 Password valid?', isValidPassword);
     
     if (!isValidPassword) {
       console.log('❌ Password comparison failed for:', username);
+      console.log('This could mean:');
+      console.log('1. Password is incorrect');
+      console.log('2. Hash was created with different salt rounds');
+      console.log('3. Hash was created with different bcrypt version');
+      
+      // Try manual verification for debugging
+      console.log('\n🔍 DEBUG INFO:');
+      console.log('Hash prefix:', admin.password_hash.substring(0, 30));
+      console.log('Expected prefix for bcrypt:', '$2b$');
+      console.log('Hash length:', admin.password_hash.length);
+      
       return res.status(401).json({
         success: false,
         message: 'Invalid password'
@@ -1955,7 +1985,10 @@ app.post('/api/admin/auth/login', async (req, res) => {
     
     // 5. Create JWT token
     const jwt = require('jsonwebtoken');
-    const JWT_SECRET = process.env.JWT_SECRET || 'admin-secret-key-2024';
+    const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
+    
+    console.log('📝 Creating JWT with secret length:', JWT_SECRET.length);
+    
     const token = jwt.sign(
       { 
         id: admin._id, 
@@ -1968,6 +2001,7 @@ app.post('/api/admin/auth/login', async (req, res) => {
     );
     
     console.log('✅ Login successful! Token created.');
+    console.log('📱 Token (first 50 chars):', token.substring(0, 50) + '...');
     
     // 6. Send response matching your frontend expectations
     res.json({
@@ -1981,13 +2015,20 @@ app.post('/api/admin/auth/login', async (req, res) => {
         full_name: admin.full_name,
         role: admin.role,
         permissions: admin.permissions || [],
-        phone: admin.phone
+        phone: admin.phone,
+        last_login: admin.last_login
       }
     });
     
   } catch (error) {
     console.error('🔥 Login error:', error.message);
     console.error('Stack:', error.stack);
+    
+    // More detailed error information
+    if (error.name === 'TypeError') {
+      console.error('TypeError details:', error);
+    }
+    
     res.status(500).json({ 
       success: false, 
       message: 'Server error',
@@ -3177,6 +3218,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
