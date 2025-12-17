@@ -1903,65 +1903,91 @@ app.get('/api/notifications/config', async (req, res) => {
 app.post('/api/admin/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body;
-    console.log('🔐 Login attempt:', { username, password });
+    console.log('🔐 Login attempt:', username, 'Password length:', password?.length);
     
-    // SIMPLE FIX: Accept any admin login with password "Admin@123"
-    // This will let you login immediately
-    const validUsers = {
-      'admin': { id: '1', role: 'admin' },
-      'superadmin': { id: '2', role: 'super_admin' }
-    };
+    // 1. Find admin in database (check both username and email fields)
+    const admin = await Admin.findOne({ 
+      $or: [
+        { username: username.toLowerCase().trim() },
+        { email: username.toLowerCase().trim() }
+      ]
+    });
     
-    // Check username exists
-    const user = validUsers[username];
-    
-    if (!user) {
-      console.log('❌ Username not found:', username);
+    if (!admin) {
+      console.log('❌ Admin not found for:', username);
       return res.status(401).json({
         success: false,
-        message: 'Invalid credentials'
+        message: 'Invalid username or email'
       });
     }
     
-    // Check password - CHANGE THIS to match what you're typing
-    const correctPassword = 'Admin@123'; // Your login page uses this
+    console.log('✅ Admin found:', admin.username, 'Email:', admin.email);
+    console.log('🔑 Password hash in DB:', admin.password_hash.substring(0, 30) + '...');
     
-    if (password !== correctPassword) {
-      console.log('❌ Wrong password for user:', username);
+    // 2. Check if account is active
+    if (!admin.is_active) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid credentials'
+        message: 'Account is deactivated'
       });
     }
     
-    // Create JWT token
+    // 3. IMPORTANT FIX: Your hash uses $2b$ not $2a$
+    // The bcrypt library handles both, but let's verify
+    const bcrypt = require('bcryptjs');
+    
+    console.log('🔄 Comparing password...');
+    const isValidPassword = await bcrypt.compare(password, admin.password_hash);
+    console.log('🔐 Password valid?', isValidPassword);
+    
+    if (!isValidPassword) {
+      console.log('❌ Password comparison failed for:', username);
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid password'
+      });
+    }
+    
+    // 4. Update last login
+    admin.last_login = new Date();
+    admin.login_attempts = 0;
+    await admin.save();
+    
+    // 5. Create JWT token
+    const jwt = require('jsonwebtoken');
+    const JWT_SECRET = process.env.JWT_SECRET || 'admin-secret-key-2024';
     const token = jwt.sign(
       { 
-        id: user.id, 
-        username: username,
-        role: user.role
+        id: admin._id, 
+        username: admin.username,
+        role: admin.role,
+        permissions: admin.permissions || []
       },
-      process.env.JWT_SECRET || 'your-secret-key-change-this',
+      JWT_SECRET,
       { expiresIn: '8h' }
     );
     
-    console.log('✅ Login successful for:', username);
+    console.log('✅ Login successful! Token created.');
     
+    // 6. Send response matching your frontend expectations
     res.json({
       success: true,
       message: 'Login successful',
       token,
       admin: {
-        id: user.id,
-        username: username,
-        role: user.role,
-        email: `${username}@carrental.com`,
-        full_name: `${username.charAt(0).toUpperCase() + username.slice(1)} User`
+        id: admin._id,
+        username: admin.username,
+        email: admin.email,
+        full_name: admin.full_name,
+        role: admin.role,
+        permissions: admin.permissions || [],
+        phone: admin.phone
       }
     });
     
   } catch (error) {
-    console.error('🔥 Login error:', error);
+    console.error('🔥 Login error:', error.message);
+    console.error('Stack:', error.stack);
     res.status(500).json({ 
       success: false, 
       message: 'Server error',
@@ -3151,6 +3177,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
