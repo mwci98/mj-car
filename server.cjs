@@ -1513,7 +1513,7 @@ app.get('/api/admin/stats', async (req, res) => {
     });
     const pendingPayments = await Booking.countDocuments({
     
-      status: { $in: ['pending', 'conformed'] }
+      status: { $in: ['pending', 'confirmed'] }
     });
     
     // Get revenue stats
@@ -2670,6 +2670,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
