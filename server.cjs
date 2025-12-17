@@ -165,7 +165,7 @@ const bookingSchema = new mongoose.Schema({
   status: { 
     type: String, 
     default: 'pending', 
-    enum: [ 'confirmed', 'handed_over', 'in_use', 'returned', 'completed', 'cancelled', 'overdue'] 
+    enum: [ 'confirmed', 'handed_over', 'in_use', 'returned', 'completed', 'cancelled', 'overdue','pending'] 
   },
   
   // Notification tracking
@@ -1976,5 +1976,6 @@ app.listen(PORT, () => {
     📊 Health Check: GET /api/health
   `);
 });
+
 
 
