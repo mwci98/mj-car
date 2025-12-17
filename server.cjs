@@ -203,7 +203,7 @@ adminSchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password_hash);
 };
 
-const Admin = mongoose.model('Admin', adminSchema);
+const Admin = mongoose.model('admin_users', adminSchema);
 // ==================== UPDATED BOOKING SCHEMA ====================
 // Booking Schema with ALL admin fields
 const bookingSchema = new mongoose.Schema({
@@ -3177,6 +3177,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
