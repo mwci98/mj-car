@@ -63,7 +63,73 @@ const vehicleSchema = new mongoose.Schema({
 });
 
 const Vehicle = mongoose.model('Vehicle', vehicleSchema);
+// ==================== ADMIN AUTHENTICATION ====================
 
+// Add after your other schemas (Vehicle, Booking)
+
+// Admin User Schema
+const adminSchema = new mongoose.Schema({
+  username: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    lowercase: true
+  },
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true
+  },
+  password_hash: {
+    type: String,
+    required: true
+  },
+  full_name: {
+    type: String,
+    required: true
+  },
+  role: {
+    type: String,
+    enum: ['super_admin', 'admin', 'manager', 'viewer'],
+    default: 'admin'
+  },
+  is_active: {
+    type: Boolean,
+    default: true
+  },
+  phone: String,
+  permissions: [String],
+  last_login: Date,
+  login_attempts: {
+    type: Number,
+    default: 0
+  },
+  locked_until: Date,
+  created_at: {
+    type: Date,
+    default: Date.now
+  },
+  updated_at: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+// Pre-save middleware
+adminSchema.pre('save', function(next) {
+  this.updated_at = Date.now();
+  next();
+});
+
+// Method to compare password
+adminSchema.methods.comparePassword = async function(candidatePassword) {
+  const bcrypt = require('bcryptjs');
+  return await bcrypt.compare(candidatePassword, this.password_hash);
+};
+
+const Admin = mongoose.model('Admin', adminSchema);
 // ==================== UPDATED BOOKING SCHEMA ====================
 // Booking Schema with ALL admin fields
 const bookingSchema = new mongoose.Schema({
@@ -1476,7 +1542,7 @@ app.post('/api/bookings/:id/test-notify', async (req, res) => {
     });
   }
 });
-app.get('/api/admin/stats', async (req, res) => {
+app.get('/api/admin/stats',  authenticateAdmin(), async (req, res) => {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -1746,7 +1812,454 @@ app.get('/api/notifications/config', async (req, res) => {
 });
 
 // ==================== ADMIN ENDPOINTS - UPDATED ====================
+/**
+ * Create Razorpay order for adding vehicle
+ */
 
+// ==================== ADMIN AUTH ROUTES ====================
+// ==================== JWT AUTHENTICATION MIDDLEWARE ====================
+
+const jwt = require('jsonwebtoken');
+
+// Authentication middleware
+const authenticateAdmin = (requiredRole = null) => {
+  return async (req, res, next) => {
+    try {
+      // Get token from header
+      const authHeader = req.headers.authorization;
+      
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({
+          success: false,
+          message: 'Access denied. No token provided.'
+        });
+      }
+      
+      const token = authHeader.split(' ')[1];
+      
+      // Verify token
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-this');
+      
+      // Find admin
+      const admin = await Admin.findById(decoded.id);
+      
+      if (!admin) {
+        return res.status(401).json({
+          success: false,
+          message: 'Admin not found'
+        });
+      }
+      
+      if (!admin.is_active) {
+        return res.status(401).json({
+          success: false,
+          message: 'Account is deactivated'
+        });
+      }
+      
+      // Check role if required
+      if (requiredRole && admin.role !== requiredRole) {
+        return res.status(403).json({
+          success: false,
+          message: 'Insufficient permissions'
+        });
+      }
+      
+      // Add admin to request
+      req.admin = admin;
+      next();
+      
+    } catch (error) {
+      console.error('Authentication error:', error);
+      
+      if (error.name === 'TokenExpiredError') {
+        return res.status(401).json({
+          success: false,
+          message: 'Token expired'
+        });
+      }
+      
+      if (error.name === 'JsonWebTokenError') {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid token'
+        });
+      }
+      
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication failed'
+      });
+    }
+  };
+};
+const bcrypt = require('bcryptjs');
+
+// Admin Login Route
+app.post('/api/admin/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    // Input validation
+    if (!username || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Username and password are required'
+      });
+    }
+
+    // Find admin by username or email
+    const admin = await Admin.findOne({
+      $or: [
+        { username: username.toLowerCase().trim() },
+        { email: username.toLowerCase().trim() }
+      ]
+    });
+
+    if (!admin) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid credentials'
+      });
+    }
+
+    // Check if account is locked
+    if (admin.locked_until && admin.locked_until > new Date()) {
+      return res.status(423).json({
+        success: false,
+        message: 'Account is locked. Try again later.'
+      });
+    }
+
+    // Check if account is active
+    if (!admin.is_active) {
+      return res.status(401).json({
+        success: false,
+        message: 'Account is deactivated'
+      });
+    }
+
+    // Verify password
+    const isValidPassword = await admin.comparePassword(password);
+    
+    if (!isValidPassword) {
+      // Increment failed attempts
+      admin.login_attempts += 1;
+      
+      // Lock account after 5 failed attempts for 15 minutes
+      if (admin.login_attempts >= 5) {
+        admin.locked_until = new Date(Date.now() + 15 * 60 * 1000);
+        admin.login_attempts = 0;
+      }
+      
+      await admin.save();
+      
+      return res.status(401).json({
+        success: false,
+        message: `Invalid credentials. ${5 - admin.login_attempts} attempts remaining`
+      });
+    }
+
+    // Reset login attempts on successful login
+    admin.login_attempts = 0;
+    admin.last_login = new Date();
+    await admin.save();
+
+    // Create JWT token
+    const token = jwt.sign(
+      { 
+        id: admin._id, 
+        username: admin.username,
+        role: admin.role,
+        permissions: admin.permissions
+      },
+      process.env.JWT_SECRET || 'your-secret-key-change-this',
+      { expiresIn: '8h' }
+    );
+
+    // Return success with token (exclude password hash)
+    res.json({
+      success: true,
+      message: 'Login successful',
+      token,
+      admin: {
+        id: admin._id,
+        username: admin.username,
+        email: admin.email,
+        full_name: admin.full_name,
+        role: admin.role,
+        permissions: admin.permissions,
+        is_active: admin.is_active,
+        last_login: admin.last_login
+      }
+    });
+
+  } catch (error) {
+    console.error('Admin login error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Admin Logout Route
+app.post('/api/admin/auth/logout', (req, res) => {
+  res.json({ 
+    success: true, 
+    message: 'Logged out successfully' 
+  });
+});
+
+// Verify Admin Token
+app.get('/api/admin/auth/verify',authenticateAdmin(), async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        valid: false, 
+        message: 'No token provided' 
+      });
+    }
+    
+    const token = authHeader.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-this');
+    
+    const admin = await Admin.findById(decoded.id).select('-password_hash');
+    
+    if (!admin) {
+      return res.status(401).json({ 
+        valid: false, 
+        message: 'Admin not found' 
+      });
+    }
+    
+    if (!admin.is_active) {
+      return res.status(401).json({ 
+        valid: false, 
+        message: 'Account is deactivated' 
+      });
+    }
+    
+    res.json({ 
+      valid: true, 
+      admin,
+      token: token 
+    });
+    
+  } catch (error) {
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ 
+        valid: false, 
+        message: 'Token expired' 
+      });
+    }
+    
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({ 
+        valid: false, 
+        message: 'Invalid token' 
+      });
+    }
+    
+    console.error('Token verification error:', error);
+    res.status(500).json({ 
+      valid: false, 
+      message: 'Server error' 
+    });
+  }
+});
+
+// Get Current Admin Profile
+app.get('/api/admin/auth/profile', authenticateAdmin(), async (req, res) => {
+  try {
+    const admin = await Admin.findById(req.admin._id).select('-password_hash');
+    
+    res.json({
+      success: true,
+      admin
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+app.post('/api/admin/vehicles/create-payment-order',authenticateAdmin(), async (req, res) => {
+  try {
+    console.log('💰 Creating vehicle registration payment order...');
+    
+    const { vehicleName, rcNumber, amount = 50000 } = req.body; // 50000 paise = ₹500
+    
+    // Create Razorpay order
+    const options = {
+      amount: amount, // ₹500 in paise
+      currency: 'INR',
+      receipt: `VEHICLE_${Date.now()}`,
+      notes: {
+        type: 'vehicle_registration',
+        vehicleName: vehicleName,
+        rcNumber: rcNumber
+      },
+      payment_capture: 1 // Auto capture payment
+    };
+    
+    console.log('Calling Razorpay API for vehicle registration:', options);
+    
+    const order = await razorpay.orders.create(options);
+    
+    console.log('✅ Vehicle registration order created:', order.id);
+    
+    res.json({
+      success: true,
+      order: {
+        id: order.id,
+        entity: order.entity,
+        amount: order.amount,
+        amount_paid: order.amount_paid,
+        amount_due: order.amount_due,
+        currency: order.currency,
+        receipt: order.receipt,
+        status: order.status,
+        created_at: order.created_at
+      },
+      key: razorpay.key_id,
+      amount: amount,
+      message: 'Payment order created for vehicle registration'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error creating vehicle payment order:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: error.error ? error.error.description : undefined
+    });
+  }
+});
+
+/**
+ * Verify vehicle registration payment
+ */
+app.post('/api/admin/vehicles/verify-payment', authenticateAdmin(), async (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, vehicleData } = req.body;
+    
+    console.log('🔍 Verifying vehicle registration payment:', razorpay_order_id);
+    
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !vehicleData) {
+      return res.status(400).json({
+        success: false,
+        error: 'All payment details and vehicle data are required'
+      });
+    }
+    
+    // Verify signature
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSignature = crypto
+      .createHmac('sha256', razorpay.key_secret)
+      .update(body.toString())
+      .digest('hex');
+    
+    const isValid = expectedSignature === razorpay_signature;
+    
+    if (!isValid) {
+      return res.status(400).json({
+        success: false,
+        error: 'Payment verification failed'
+      });
+    }
+    
+    console.log('✅ Payment verified, now adding vehicle to database...');
+    
+    // Create vehicle in database after payment verification
+    const vehicle = new Vehicle({
+      name: vehicleData.name,
+      quantity: vehicleData.quantity,
+      rcNumber: vehicleData.rcNumber,
+      type: vehicleData.type,
+      capacity: vehicleData.capacity,
+      transmission: vehicleData.transmission,
+      dailyRate: vehicleData.dailyRate,
+      lateFees: vehicleData.lateFees || 0,
+      perKmRate: vehicleData.perKmRate,
+      minDailyKm: vehicleData.minDailyKm,
+      extraKmRate: vehicleData.extraKmRate,
+      allowedDistricts: vehicleData.allowedDistricts || ['Kohima'],
+      isAvailable: true,
+      features: vehicleData.features || [],
+      image: vehicleData.image || '',
+      // Additional fields
+      brand: vehicleData.brand || '',
+      model: vehicleData.model || '',
+      weeklyRate: vehicleData.weeklyRate || 0,
+      monthlyRate: vehicleData.monthlyRate || 0,
+      location: vehicleData.location || 'Kohima',
+      fuelType: vehicleData.fuelType || 'Petrol',
+      year: vehicleData.year || new Date().getFullYear(),
+      color: vehicleData.color || '#3b82f6',
+      seatingCapacity: vehicleData.seatingCapacity || vehicleData.capacity
+    });
+    
+    await vehicle.save();
+    
+    console.log('✅ Vehicle added to database:', vehicle._id);
+    
+    // Log the payment transaction
+    const paymentRecord = new VehiclePayment({
+      vehicleId: vehicle._id,
+      razorpayOrderId: razorpay_order_id,
+      razorpayPaymentId: razorpay_payment_id,
+      razorpaySignature: razorpay_signature,
+      amount: 50000, // ₹500 in paise
+      status: 'completed',
+      registrationFee: true,
+      processedAt: new Date()
+    });
+    
+    await paymentRecord.save();
+    
+    res.json({
+      success: true,
+      message: 'Payment successful and vehicle added to fleet!',
+      paymentId: razorpay_payment_id,
+      vehicleId: vehicle._id,
+      vehicle: {
+        id: vehicle._id,
+        name: vehicle.name,
+        rcNumber: vehicle.rcNumber,
+        dailyRate: vehicle.dailyRate,
+        type: vehicle.type,
+        isAvailable: vehicle.isAvailable
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in vehicle payment verification:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Add Vehicle Payment Schema (add this before the routes)
+const vehiclePaymentSchema = new mongoose.Schema({
+  vehicleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Vehicle' },
+  razorpayOrderId: String,
+  razorpayPaymentId: String,
+  razorpaySignature: String,
+  amount: Number,
+  status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
+  registrationFee: { type: Boolean, default: false },
+  processedAt: Date
+}, { timestamps: true });
+
+const VehiclePayment = mongoose.model('VehiclePayment', vehiclePaymentSchema);
 // Helper function to find booking by either bookingId or _id
 const findBooking = async (identifier) => {
   // First try to find by bookingId
@@ -1763,7 +2276,7 @@ const findBooking = async (identifier) => {
 /**
  * Get all bookings for admin (with filtering)
  */
-app.get('/api/admin/bookings', async (req, res) => {
+app.get('/api/admin/bookings', authenticateAdmin(), async (req, res) => {
   try {
     const { status, search, page = 1, limit = 20 } = req.query;
     
@@ -1812,7 +2325,7 @@ app.get('/api/admin/bookings', async (req, res) => {
 /**
  * Admin payment processing endpoint
  */
-app.post('/api/admin/bookings/:identifier/payment', async (req, res) => {
+app.post('/api/admin/bookings/:identifier/payment', authenticateAdmin(), async (req, res) => {
   try {
     const { identifier } = req.params;
     const { 
@@ -1900,7 +2413,7 @@ app.post('/api/admin/bookings/:identifier/payment', async (req, res) => {
 /**
  * Create manual booking (for admin panel)
  */
-app.post('/api/admin/bookings/manual', async (req, res) => {
+app.post('/api/admin/bookings/manual',  authenticateAdmin(), async (req, res) => {
   try {
     console.log('📝 Creating manual booking:', req.body);
     
@@ -2067,7 +2580,7 @@ app.post('/api/admin/bookings/manual', async (req, res) => {
 /**
  * Update booking status (admin actions)
  */
-app.put('/api/admin/bookings/:identifier/status', async (req, res) => {
+app.put('/api/admin/bookings/:identifier/status',  authenticateAdmin(), async (req, res) => {
   try {
     const { identifier } = req.params;
     const { status, notes, actionBy } = req.body;
@@ -2149,7 +2662,7 @@ app.put('/api/admin/bookings/:identifier/status', async (req, res) => {
 /**
  * Cancel booking (admin)
  */
-app.post('/api/admin/bookings/:identifier/cancel', async (req, res) => {
+app.post('/api/admin/bookings/:identifier/cancel',  authenticateAdmin(), async (req, res) => {
   try {
     const { identifier } = req.params;
     const { reason, refundAmount, actionBy } = req.body;
@@ -2214,7 +2727,7 @@ app.post('/api/admin/bookings/:identifier/cancel', async (req, res) => {
 /**
  * Hand over vehicle to customer
  */
-app.post('/api/admin/bookings/:identifier/handover', async (req, res) => {
+app.post('/api/admin/bookings/:identifier/handover',  authenticateAdmin(), async (req, res) => {
   try {
     const { identifier } = req.params;
     const { 
@@ -2293,7 +2806,7 @@ app.post('/api/admin/bookings/:identifier/handover', async (req, res) => {
 /**
  * Return vehicle from customer
  */
-app.post('/api/admin/bookings/:identifier/return', async (req, res) => {
+app.post('/api/admin/bookings/:identifier/return',  authenticateAdmin(), async (req, res) => {
   try {
     const { identifier } = req.params;
     const { 
@@ -2470,7 +2983,7 @@ app.post('/api/admin/bookings/:identifier/return', async (req, res) => {
 /**
  * Complete booking (after return)
  */
-app.post('/api/admin/bookings/:identifier/complete', async (req, res) => {
+app.post('/api/admin/bookings/:identifier/complete',  authenticateAdmin(), async (req, res) => {
   try {
     const { identifier } = req.params;
     const { finalNotes, completedBy } = req.body;
@@ -2540,7 +3053,7 @@ app.post('/api/admin/bookings/:identifier/complete', async (req, res) => {
 /**
  * Get booking pipeline (for kanban view)
  */
-app.get('/api/admin/bookings/pipeline', async (req, res) => {
+app.get('/api/admin/bookings/pipeline',  authenticateAdmin(), async (req, res) => {
   try {
     const bookings = await Booking.find()
       .sort({ createdAt: -1 })
@@ -2672,6 +3185,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
