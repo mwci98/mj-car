@@ -1511,6 +1511,10 @@ app.get('/api/admin/stats', async (req, res) => {
       dropoffDate: { $gte: today, $lt: tomorrow },
       status: { $in: ['handed_over', 'in_use'] }
     });
+    const pendingPayments = await Booking.countDocuments({
+    
+      status: { $in: ['pending', 'conformed'] }
+    });
     
     // Get revenue stats
     const revenueStats = await Booking.aggregate([
@@ -2666,6 +2670,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
