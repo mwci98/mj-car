@@ -683,7 +683,7 @@ app.post('/api/admin/auth/logout', (req, res) => {
 });
 
 // Verify Admin Token
-app.get('/api/admin/auth/verify', authenticateAdmin(), async (req, res) => {
+app.get('/api/admin/auth/verify', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
     
@@ -1976,3 +1976,4 @@ app.listen(PORT, () => {
     📊 Health Check: GET /api/health
   `);
 });
+
