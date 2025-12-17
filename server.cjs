@@ -250,6 +250,10 @@ app.get('/', (req, res) => {
     message: '🚗 Kohima Car Rentals API',
     status: 'running',
     endpoints: {
+      adminLogin: 'POST /api/admin/auth/login',
+      adminLogout: 'POST /api/admin/auth/logout',
+      adminVerify: 'GET /api/admin/auth/verify',
+      adminProfile: 'GET /api/admin/auth/profile',
       vehicles: 'GET /api/vehicles',
       availableVehicles: 'GET /api/vehicles/available',
       checkAvailability: 'POST /api/vehicles/availability',
@@ -3185,6 +3189,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
