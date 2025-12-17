@@ -1511,10 +1511,25 @@ app.get('/api/admin/stats', async (req, res) => {
       dropoffDate: { $gte: today, $lt: tomorrow },
       status: { $in: ['handed_over', 'in_use'] }
     });
-    const pendingPayments = await Booking.countDocuments({
-    
+// In your backend route, replace:
+
+
+// With:
+const pendingPaymentsAgg = await Booking.aggregate([
+  {
+    $match: {
       status: { $in: ['pending', 'confirmed'] }
-    });
+    }
+  },
+  {
+    $group: {
+      _id: null,
+      totalAmount: { $sum: '$totalAmount' }
+    }
+  }
+]);
+
+const pendingPayments = pendingPaymentsAgg[0]?.totalAmount || 0;
     
     // Get revenue stats
     const revenueStats = await Booking.aggregate([
@@ -2670,6 +2685,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
