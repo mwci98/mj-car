@@ -1774,6 +1774,180 @@ app.post('/api/admin/bookings/:identifier/handover', async (req, res) => {
     });
   }
 });
+app.post('/api/admin/bookings/:identifier/return', async (req, res) => {
+  try {
+    const { identifier } = req.params;
+    const { 
+      odometerReading, 
+      fuelLevel, 
+      conditionNotes,
+      returnStatus,
+      additionalCharges,
+      notes,
+      returnedBy
+    } = req.body;
+    
+    const booking = await findBooking(identifier);
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        error: 'Booking not found'
+      });
+    }
+    
+    // Check if booking can be returned
+    if (!['handed_over', 'in_use', 'overdue'].includes(booking.status)) {
+      return res.status(400).json({
+        success: false,
+        error: `Booking cannot be returned from status: ${booking.status}`
+      });
+    }
+    
+    // Calculate additional charges
+    let charges = [];
+    let totalAdditionalCharges = 0;
+    
+    // Initialize additional charges from request body
+    if (additionalCharges && Array.isArray(additionalCharges)) {
+      charges = additionalCharges;
+      totalAdditionalCharges = charges.reduce((sum, charge) => sum + (charge.amount || 0), 0);
+    }
+    
+    // Calculate fuel charges if fuel level is provided
+    if (fuelLevel && booking.handoverData && booking.handoverData.fuelLevel) {
+      const fuelChargePerLevel = 500; // Example: ₹500 per fuel level difference
+      const handoverFuelLevel = booking.handoverData.fuelLevel;
+      
+      // Convert fuel levels to numerical values for calculation
+      const fuelLevels = {
+        'empty': 0,
+        'quarter': 25,
+        'half': 50,
+        'three_quarter': 75,
+        'full': 100
+      };
+      
+      const handoverLevel = fuelLevels[handoverFuelLevel.toLowerCase()] || 0;
+      const returnLevel = fuelLevels[fuelLevel.toLowerCase()] || 0;
+      
+      if (returnLevel < handoverLevel) {
+        const fuelDifference = handoverLevel - returnLevel;
+        const fuelCharge = (fuelDifference / 100) * 4 * fuelChargePerLevel; // Assuming 4 fuel levels total
+        
+        charges.push({
+          type: 'fuel_replacement',
+          description: `Fuel replacement for ${fuelDifference}% difference`,
+          amount: fuelCharge
+        });
+        
+        totalAdditionalCharges += fuelCharge;
+      }
+    }
+    
+    // Calculate late return charges if applicable
+    const now = new Date();
+    const scheduledReturnDate = new Date(booking.endDate);
+    
+    if (now > scheduledReturnDate) {
+      const hoursLate = Math.ceil((now - scheduledReturnDate) / (1000 * 60 * 60));
+      const lateChargePerHour = 200; // Example: ₹200 per hour
+      const lateCharge = hoursLate * lateChargePerHour;
+      
+      charges.push({
+        type: 'late_return',
+        description: `Late return by ${hoursLate} hours`,
+        amount: lateCharge
+      });
+      
+      totalAdditionalCharges += lateCharge;
+    }
+    
+    // Calculate extra kilometer charges
+    if (odometerReading && booking.handoverData && booking.handoverData.odometerReading) {
+      const startOdometer = booking.handoverData.odometerReading;
+      const endOdometer = odometerReading;
+      const allowedKms = (booking.durationDays || 1) * 300; // Example: 300 km per day
+      const extraKms = Math.max(0, endOdometer - startOdometer - allowedKms);
+      
+      if (extraKms > 0) {
+        const kmCharge = extraKms * 10; // Example: ₹10 per extra km
+        
+        charges.push({
+          type: 'extra_kilometers',
+          description: `${extraKms} extra kilometers`,
+          amount: kmCharge
+        });
+        
+        totalAdditionalCharges += kmCharge;
+      }
+    }
+    
+    // Check for damage charges based on condition notes
+    if (conditionNotes && conditionNotes.toLowerCase().includes('damage')) {
+      const damageCharge = 2000; // Example: ₹2000 for damage
+      
+      charges.push({
+        type: 'damage_charge',
+        description: 'Vehicle damage noted',
+        amount: damageCharge
+      });
+      
+      totalAdditionalCharges += damageCharge;
+    }
+    
+    // Update booking
+    booking.status = 'returned';
+    booking.returnData = {
+      odometerReading: odometerReading || 0,
+      fuelLevel: fuelLevel || 'full',
+      conditionNotes: conditionNotes || 'Good condition',
+      returnStatus: returnStatus || 'good',
+      additionalCharges: charges, // Use the calculated charges array
+      totalAdditionalCharges: totalAdditionalCharges, // Use the calculated total
+      notes: notes || '',
+      returnedBy: returnedBy || 'admin',
+      returnedAt: new Date()
+    };
+    
+    // Update total amount
+    booking.totalAmount = (booking.totalAmount || 0) + totalAdditionalCharges;
+    
+    // Add status history
+    if (!booking.statusHistory) {
+      booking.statusHistory = [];
+    }
+    
+    booking.statusHistory.push({
+      status: 'returned',
+      timestamp: new Date(),
+      actionBy: returnedBy || 'admin',
+      notes: 'Vehicle returned by customer',
+      additionalCharges: totalAdditionalCharges
+    });
+    
+    await booking.save();
+    
+    res.json({
+      success: true,
+      message: 'Vehicle returned successfully',
+      booking: {
+        bookingId: booking.bookingId,
+        status: booking.status,
+        customerName: booking.customerName,
+        vehicleName: booking.vehicleName,
+        returnData: booking.returnData,
+        totalAmount: booking.totalAmount
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error in vehicle return:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 // Create manual booking (for admin panel)
 app.post('/api/admin/bookings/manual',  async (req, res) => {
   try {
@@ -2047,6 +2221,7 @@ app.listen(PORT, () => {
     📊 Health Check: GET /api/health
   `);
 });
+
 
 
 
