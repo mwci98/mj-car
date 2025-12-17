@@ -1515,40 +1515,11 @@ app.get('/api/admin/stats', async (req, res) => {
 
 
 // With:
-const pendingPaymentsAgg = await Booking.aggregate([
-  {
-    $match: {
-      status: { $in: ['pending', 'confirmed'] }
-    }
-  },
-  {
-    $group: {
-      _id: null,
-      totalAmount: { $sum: '$totalAmount' }
-    }
-  }
-]);
 
-const pendingPayments = pendingPaymentsAgg[0]?.totalAmount || 0;
-    
-    // Get revenue stats
-    const revenueStats = await Booking.aggregate([
-      {
-        $match: {
-          paymentStatus: 'paid',
-          createdAt: { $gte: monthAgo }
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalRevenue: { $sum: '$totalAmount' },
-          avgRevenue: { $avg: '$totalAmount' },
-          count: { $sum: 1 }
-        }
-      }
-    ]);
-    
+
+const pendingBookingsCount = await Booking.countDocuments({
+  status: { $in: ['pending', 'confirmed'] }
+});
     // Get recent bookings
     const recentBookings = await Booking.find()
       .sort({ createdAt: -1 })
@@ -1567,6 +1538,7 @@ const pendingPayments = pendingPaymentsAgg[0]?.totalAmount || 0;
         statusCounts: statusMap,
         todaysPickups,
         todaysDropoffs,
+        pendingBookingsCount,
         totalRevenue: revenueStats[0]?.totalRevenue || 0,
         avgBookingValue: revenueStats[0]?.avgRevenue || 0,
         recentBookings: recentBookings.map(b => ({
@@ -2685,6 +2657,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
