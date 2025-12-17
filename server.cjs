@@ -1518,7 +1518,7 @@ app.get('/api/admin/stats', async (req, res) => {
 
 
 const pendingBookingsCount = await Booking.countDocuments({
-  status: { $in: ['pending', 'confirmed'] }
+  status: { $in: ['pending'] }
 });
     // Get recent bookings
     const recentBookings = await Booking.find()
@@ -2657,6 +2657,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
