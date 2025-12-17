@@ -1897,81 +1897,7 @@ app.get('/api/notifications/config', async (req, res) => {
 // ==================== ADMIN AUTH ROUTES ====================
 // ==================== JWT AUTHENTICATION MIDDLEWARE ====================
 
-const jwt = require('jsonwebtoken');
 
-// Authentication middleware
-const authenticateAdmin = (requiredRole = null) => {
-  return async (req, res, next) => {
-    try {
-      // Get token from header
-      const authHeader = req.headers.authorization;
-      
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({
-          success: false,
-          message: 'Access denied. No token provided.'
-        });
-      }
-      
-      const token = authHeader.split(' ')[1];
-      
-      // Verify token
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-this');
-      
-      // Find admin
-      const admin = await Admin.findById(decoded.id);
-      
-      if (!admin) {
-        return res.status(401).json({
-          success: false,
-          message: 'Admin not found'
-        });
-      }
-      
-      if (!admin.is_active) {
-        return res.status(401).json({
-          success: false,
-          message: 'Account is deactivated'
-        });
-      }
-      
-      // Check role if required
-      if (requiredRole && admin.role !== requiredRole) {
-        return res.status(403).json({
-          success: false,
-          message: 'Insufficient permissions'
-        });
-      }
-      
-      // Add admin to request
-      req.admin = admin;
-      next();
-      
-    } catch (error) {
-      console.error('Authentication error:', error);
-      
-      if (error.name === 'TokenExpiredError') {
-        return res.status(401).json({
-          success: false,
-          message: 'Token expired'
-        });
-      }
-      
-      if (error.name === 'JsonWebTokenError') {
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid token'
-        });
-      }
-      
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication failed'
-      });
-    }
-  };
-};
-const bcrypt = require('bcryptjs');
 
 // Admin Login Route
 app.post('/api/admin/auth/login', async (req, res) => {
@@ -3263,6 +3189,7 @@ app.listen(PORT, () => {
   `);
 
 });
+
 
 
 
