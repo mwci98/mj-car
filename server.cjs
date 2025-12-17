@@ -743,7 +743,7 @@ app.get('/api/admin/auth/verify', async (req, res) => {
 });
 
 // Get Current Admin Profile
-app.get('/api/admin/auth/profile', authenticateAdmin(), async (req, res) => {
+app.get('/api/admin/auth/profile', async (req, res) => {
   try {
     const admin = await Admin.findById(req.admin._id).select('-password_hash');
     
@@ -1429,7 +1429,7 @@ app.post('/api/bookings/:id/notify', async (req, res) => {
 // ==================== ADMIN MANAGEMENT ROUTES ====================
 
 // Get all bookings for admin (with filtering)
-app.get('/api/admin/bookings', authenticateAdmin(), async (req, res) => {
+app.get('/api/admin/bookings',  async (req, res) => {
   try {
     const { status, search, page = 1, limit = 20 } = req.query;
     
@@ -1477,7 +1477,7 @@ app.get('/api/admin/bookings', authenticateAdmin(), async (req, res) => {
 });
 
 // Admin dashboard stats
-app.get('/api/admin/stats', authenticateAdmin(), async (req, res) => {
+app.get('/api/admin/stats',  async (req, res) => {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -1574,7 +1574,7 @@ app.get('/api/admin/stats', authenticateAdmin(), async (req, res) => {
 });
 
 // Get booking pipeline (for kanban view)
-app.get('/api/admin/bookings/pipeline', authenticateAdmin(), async (req, res) => {
+app.get('/api/admin/bookings/pipeline',  async (req, res) => {
   try {
     const bookings = await Booking.find()
       .sort({ createdAt: -1 })
@@ -1617,7 +1617,7 @@ app.get('/api/admin/bookings/pipeline', authenticateAdmin(), async (req, res) =>
 });
 
 // Admin payment processing endpoint
-app.post('/api/admin/bookings/:identifier/payment', authenticateAdmin(), async (req, res) => {
+app.post('/api/admin/bookings/:identifier/payment', async (req, res) => {
   try {
     const { identifier } = req.params;
     const { 
@@ -1704,7 +1704,7 @@ app.post('/api/admin/bookings/:identifier/payment', authenticateAdmin(), async (
 });
 
 // Create manual booking (for admin panel)
-app.post('/api/admin/bookings/manual', authenticateAdmin(), async (req, res) => {
+app.post('/api/admin/bookings/manual',  async (req, res) => {
   try {
     console.log('📝 Creating manual booking:', req.body);
     
@@ -1855,7 +1855,7 @@ app.post('/api/admin/bookings/manual', authenticateAdmin(), async (req, res) => 
 });
 
 // Update booking status (admin actions)
-app.put('/api/admin/bookings/:identifier/status', authenticateAdmin(), async (req, res) => {
+app.put('/api/admin/bookings/:identifier/status',  async (req, res) => {
   try {
     const { identifier } = req.params;
     const { status, notes, actionBy } = req.body;
@@ -1976,4 +1976,5 @@ app.listen(PORT, () => {
     📊 Health Check: GET /api/health
   `);
 });
+
 
