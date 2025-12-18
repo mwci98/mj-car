@@ -1,528 +1,220 @@
-// notificationService.cjs - UPDATED WITH SMS
+// notificationService.cjs - FIXED VERSION
 const nodemailer = require('nodemailer');
 const twilio = require('twilio');
-
-console.log('📧📱 Notification Service (CJS) Loading...');
 
 // Email configuration
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: process.env.EMAIL_USER || 'test@gmail.com',
-    pass: process.env.EMAIL_PASSWORD || 'test'
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASSWORD
   }
 });
 
-// Twilio SMS configuration
+// Twilio configuration (SMS)
 let twilioClient = null;
 if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
-  twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  console.log('📱 Twilio SMS configured');
-} else {
-  console.log('⚠️ Twilio not configured - SMS notifications disabled');
+  twilioClient = twilio(
+    process.env.TWILIO_ACCOUNT_SID,
+    process.env.TWILIO_AUTH_TOKEN
+  );
 }
 
-// Company details
-const COMPANY_NAME = process.env.COMPANY_NAME || 'MJ Car Rentals';
-const COMPANY_PHONE = process.env.COMPANY_PHONE || '1234567890';
-const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER || '';
-const ADMIN_PHONE = process.env.ADMIN_PHONE || '';
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || '';
-
-console.log('📧 Email configured for:', process.env.EMAIL_USER || 'Not configured');
-
-class NotificationService {
-  constructor() {
-    console.log('📧📱 NotificationService instance created');
-  }
-
-  /**
-   * Send SMS to customer
-   */
-  async sendSMSToCustomer(customerPhone, bookingDetails) {
-    try {
-      if (!twilioClient || !TWILIO_PHONE_NUMBER) {
-        console.log('⚠️ SMS not configured, skipping SMS to customer');
-        return { success: false, error: 'SMS not configured' };
-      }
-
-      if (!customerPhone) {
-        console.log('⚠️ Customer phone not provided');
-        return { success: false, error: 'Customer phone not provided' };
-      }
-
-      // Format phone number (remove +91 if present, add country code)
-      let phoneNumber = customerPhone.toString().trim();
-      
-      // Remove any non-digit characters
-      phoneNumber = phoneNumber.replace(/\D/g, '');
-      
-      // If starts with 0, remove it
-      if (phoneNumber.startsWith('0')) {
-        phoneNumber = phoneNumber.substring(1);
-      }
-      
-      // If doesn't start with country code, add India code (+91)
-      if (!phoneNumber.startsWith('91') && phoneNumber.length === 10) {
-        phoneNumber = `91${phoneNumber}`;
-      }
-      
-      // Add + prefix for Twilio
-      phoneNumber = `+${phoneNumber}`;
-      
-      console.log('📱 Sending SMS to:', phoneNumber);
-      
-      // Format dates
-      const pickupDate = new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN', {
-        day: 'numeric',
-        month: 'short',
-        year: 'numeric'
-      });
-      
-      const returnDate = new Date(bookingDetails.returnDate).toLocaleDateString('en-IN', {
-        day: 'numeric',
-        month: 'short',
-        year: 'numeric'
-      });
-
-      const message = `
-🎉 Booking Confirmed!
-Booking ID: ${bookingDetails.bookingId}
-Vehicle: ${bookingDetails.vehicleName}
-Dates: ${pickupDate} to ${returnDate}
-Amount: ₹${bookingDetails.totalAmount}
-Booking Fee: ₹${bookingDetails.bookingFee || 10} paid
-Balance: ₹${bookingDetails.totalAmount - (bookingDetails.bookingFee || 10)} at pickup
-
-Thank you for choosing ${COMPANY_NAME}! Call ${COMPANY_PHONE} for any queries.
-      `.trim();
-
-      const response = await twilioClient.messages.create({
-        body: message,
-        from: TWILIO_PHONE_NUMBER,
-        to: phoneNumber
-      });
-
-      console.log('✅ SMS sent to customer:', response.sid);
-      return { success: true, messageId: response.sid, sid: response.sid };
-      
-    } catch (error) {
-      console.error('❌ SMS to customer failed:', error.message);
-      return { success: false, error: error.message, code: error.code };
-    }
-  }
-
-  /**
-   * Send SMS to admin
-   */
-  async sendSMSToAdmin(bookingDetails) {
-    try {
-      if (!twilioClient || !TWILIO_PHONE_NUMBER || !ADMIN_PHONE) {
-        console.log('⚠️ SMS not configured, skipping SMS to admin');
-        return { success: false, error: 'SMS not configured' };
-      }
-
-      // Format phone number
-      let phoneNumber = ADMIN_PHONE.toString().trim();
-      phoneNumber = phoneNumber.replace(/\D/g, '');
-      
-      if (phoneNumber.startsWith('0')) {
-        phoneNumber = phoneNumber.substring(1);
-      }
-      
-      if (!phoneNumber.startsWith('91') && phoneNumber.length === 10) {
-        phoneNumber = `91${phoneNumber}`;
-      }
-      
-      phoneNumber = `+${phoneNumber}`;
-      
-      console.log('📱 Sending SMS to admin:', phoneNumber);
-
-      const message = `
-🚨 NEW BOOKING ALERT!
-Booking ID: ${bookingDetails.bookingId}
-Customer: ${bookingDetails.customerName}
-Phone: ${bookingDetails.customerPhone}
-Vehicle: ${bookingDetails.vehicleName}
-Amount: ₹${bookingDetails.totalAmount}
-Pickup: ${new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN')}
-      `.trim();
-
-      const response = await twilioClient.messages.create({
-        body: message,
-        from: TWILIO_PHONE_NUMBER,
-        to: phoneNumber
-      });
-
-      console.log('✅ SMS sent to admin:', response.sid);
-      return { success: true, messageId: response.sid, sid: response.sid };
-      
-    } catch (error) {
-      console.error('❌ SMS to admin failed:', error.message);
-      return { success: false, error: error.message };
-    }
-  }
-
-  /**
-   * Send email to customer
-   */
-  async sendBookingEmailToCustomer(customerEmail, bookingDetails) {
-    try {
-      console.log('📧 Sending email to customer:', customerEmail);
-      
-      if (!customerEmail || !customerEmail.includes('@')) {
-        console.log('⚠️ Invalid customer email:', customerEmail);
-        return { success: false, error: 'Invalid email address' };
-      }
-
-      const mailOptions = {
-        from: `"${COMPANY_NAME}" <${process.env.EMAIL_USER}>`,
-        to: customerEmail,
-        subject: `🎉 Booking Confirmation - ${bookingDetails.vehicleName}`,
-        html: this.generateCustomerEmail(bookingDetails),
-        text: this.generateCustomerEmailText(bookingDetails)
-      };
-
-      const info = await transporter.sendMail(mailOptions);
-      console.log('✅ Email sent to customer:', info.messageId);
-      return { success: true, messageId: info.messageId };
-    } catch (error) {
-      console.error('❌ Email to customer failed:', error.message);
-      return { success: false, error: error.message };
-    }
-  }
-
-  /**
-   * Send email to admin
-   */
-  async sendBookingEmailToAdmin(bookingDetails) {
-    try {
-      if (!ADMIN_EMAIL) {
-        console.log('⚠️ Admin email not configured');
-        return { success: false, error: 'Admin email not configured' };
-      }
-
-      console.log('📧 Sending email to admin:', ADMIN_EMAIL);
-      
-      const mailOptions = {
-        from: `"${COMPANY_NAME}" <${process.env.EMAIL_USER}>`,
-        to: ADMIN_EMAIL,
-        subject: `📋 NEW BOOKING - ${bookingDetails.bookingId}`,
-        html: this.generateAdminEmail(bookingDetails),
-        text: this.generateAdminEmailText(bookingDetails)
-      };
-
-      const info = await transporter.sendMail(mailOptions);
-      console.log('✅ Email sent to admin:', info.messageId);
-      return { success: true, messageId: info.messageId };
-    } catch (error) {
-      console.error('❌ Email to admin failed:', error.message);
-      return { success: false, error: error.message };
-    }
-  }
-
-  /**
-   * Generate customer email HTML
-   */
-  generateCustomerEmail(bookingDetails) {
-    const pickupDate = new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    });
+// Email Templates
+const emailTemplates = {
+  customerConfirmation: (booking) => `
+    <h2>🎉 Booking Confirmed! 🚗</h2>
+    <p>Dear ${booking.customerName},</p>
     
-    const returnDate = new Date(bookingDetails.returnDate).toLocaleDateString('en-IN', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    });
-
-    return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Booking Confirmation - ${COMPANY_NAME}</title>
-  <style>
-    body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
-    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
-    .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }
-    .booking-details { background: white; border-radius: 8px; padding: 20px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-    .highlight { color: #667eea; font-weight: bold; }
-    .footer { text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; color: #666; font-size: 14px; }
-    .cta-button { display: inline-block; background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; margin: 20px 0; }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <h1>🎉 Booking Confirmed!</h1>
-    <p>Dear ${bookingDetails.customerName},</p>
-  </div>
-  
-  <div class="content">
-    <p>Your booking has been successfully confirmed! Here are your booking details:</p>
+    <p>Your booking with <strong>MJ Car Rentals</strong> has been confirmed!</p>
     
-    <div class="booking-details">
-      <h2>📋 Booking Summary</h2>
-      <p><strong>Booking ID:</strong> <span class="highlight">${bookingDetails.bookingId}</span></p>
-      <p><strong>Vehicle:</strong> ${bookingDetails.vehicleName}</p>
-      <p><strong>Pickup Date:</strong> ${pickupDate}</p>
-      <p><strong>Return Date:</strong> ${returnDate}</p>
-      <p><strong>Duration:</strong> ${bookingDetails.totalDays || '1'} day(s)</p>
-      
-      <h3>💰 Payment Summary</h3>
-      <p><strong>Total Rental Amount:</strong> ₹${bookingDetails.totalAmount}</p>
-      <p><strong>Booking Fee Paid:</strong> ₹${bookingDetails.bookingFee || 10}</p>
-      <p><strong>Balance to Pay at Pickup:</strong> ₹${bookingDetails.totalAmount - (bookingDetails.bookingFee || 10)}</p>
+    <div style="background: #f8f9fa; padding: 20px; border-radius: 10px; margin: 20px 0;">
+      <h3>📋 Booking Details:</h3>
+      <p><strong>Booking ID:</strong> ${booking.bookingId}</p>
+      <p><strong>Vehicle:</strong> ${booking.vehicleName}</p>
+      <p><strong>Pickup Date:</strong> ${new Date(booking.pickupDate).toLocaleDateString()}</p>
+      <p><strong>Return Date:</strong> ${new Date(booking.returnDate).toLocaleDateString()}</p>
+      <p><strong>Total Amount:</strong> ₹${booking.totalAmount}</p>
+      <p><strong>Duration:</strong> ${booking.totalDays} days</p>
     </div>
     
-    <p><strong>📱 Important Notes:</strong></p>
-    <ul>
-      <li>Please bring your original driving license and ID proof (Aadhar/Passport)</li>
-      <li>Pay the remaining balance at vehicle pickup</li>
-      <li>Vehicle will be handed over at our office: [Your Address]</li>
-      <li>For any changes, contact us at least 24 hours before pickup</li>
-    </ul>
+    <p><strong>📍 Pickup Location:</strong> Kohima Car Rental Station</p>
+    <p><strong>🕒 Pickup Time:</strong> 9:00 AM</p>
     
-    <p><strong>📞 Contact Information:</strong></p>
-    <p>${COMPANY_NAME}<br>
-    Phone: ${COMPANY_PHONE}<br>
-    Email: ${process.env.EMAIL_USER}</p>
-    
-    <div class="footer">
-      <p>Thank you for choosing ${COMPANY_NAME}!</p>
-      <p>Safe travels! 🚗💨</p>
+    <div style="background: #e7f3ff; padding: 15px; border-radius: 8px; margin: 20px 0;">
+      <h4>📝 Important Notes:</h4>
+      <ul>
+        <li>Please bring your original driver's license and ID proof</li>
+        <li>Arrive 30 minutes before pickup time for documentation</li>
+        <li>Balance payment of ₹${booking.totalAmount - 200} to be paid at pickup</li>
+        <li>Vehicle inspection will be done at pickup time</li>
+      </ul>
     </div>
-  </div>
-</body>
-</html>
-    `;
-  }
-
-  /**
-   * Generate customer email text version
-   */
-  generateCustomerEmailText(bookingDetails) {
-    return `
-Booking Confirmation - ${COMPANY_NAME}
-
-Dear ${bookingDetails.customerName},
-
-Your booking has been successfully confirmed!
-
-📋 Booking Details:
-Booking ID: ${bookingDetails.bookingId}
-Vehicle: ${bookingDetails.vehicleName}
-Pickup Date: ${new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN')}
-Return Date: ${new Date(bookingDetails.returnDate).toLocaleDateString('en-IN')}
-Duration: ${bookingDetails.totalDays || '1'} day(s)
-
-💰 Payment Summary:
-Total Rental Amount: ₹${bookingDetails.totalAmount}
-Booking Fee Paid: ₹${bookingDetails.bookingFee || 10}
-Balance to Pay at Pickup: ₹${bookingDetails.totalAmount - (bookingDetails.bookingFee || 10)}
-
-📱 Important Notes:
-• Please bring your original driving license and ID proof (Aadhar/Passport)
-• Pay the remaining balance at vehicle pickup
-• Vehicle will be handed over at our office
-• For any changes, contact us at least 24 hours before pickup
-
-📞 Contact Information:
-${COMPANY_NAME}
-Phone: ${COMPANY_PHONE}
-Email: ${process.env.EMAIL_USER}
-
-Thank you for choosing ${COMPANY_NAME}!
-Safe travels! 🚗💨
-    `;
-  }
-
-  /**
-   * Generate admin email HTML
-   */
-  generateAdminEmail(bookingDetails) {
-    return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NEW BOOKING - ${COMPANY_NAME}</title>
-  <style>
-    body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-    .alert { background: #fff3cd; border: 1px solid #ffeaa7; padding: 20px; border-radius: 8px; margin: 20px 0; }
-    .booking-info { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; }
-    .highlight { color: #e74c3c; font-weight: bold; }
-    .action-required { background: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px; margin: 10px 0; }
-  </style>
-</head>
-<body>
-  <h1>🚨 NEW BOOKING ALERT</h1>
-  
-  <div class="alert">
-    <h2>IMMEDIATE ACTION REQUIRED</h2>
-    <p>A new booking has been received and requires processing!</p>
-  </div>
-  
-  <div class="action-required">
-    <strong>⚠️ ACTION ITEMS:</strong>
-    <ol>
-      <li>Contact customer to confirm pickup time</li>
-      <li>Prepare vehicle for handover</li>
-      <li>Update booking status in system</li>
-    </ol>
-  </div>
-  
-  <div class="booking-info">
-    <h2>📋 Booking Details</h2>
-    <p><strong>Booking ID:</strong> <span class="highlight">${bookingDetails.bookingId}</span></p>
-    <p><strong>Customer Name:</strong> ${bookingDetails.customerName}</p>
-    <p><strong>Customer Phone:</strong> ${bookingDetails.customerPhone}</p>
-    <p><strong>Customer Email:</strong> ${bookingDetails.customerEmail}</p>
-    <p><strong>Vehicle:</strong> ${bookingDetails.vehicleName}</p>
-    <p><strong>Total Amount:</strong> ₹${bookingDetails.totalAmount}</p>
-    <p><strong>Booking Fee Paid:</strong> ₹${bookingDetails.bookingFee || 10}</p>
-    <p><strong>Pickup Date:</strong> ${new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN')}</p>
-    <p><strong>Return Date:</strong> ${new Date(bookingDetails.returnDate).toLocaleDateString('en-IN')}</p>
-    <p><strong>Booked at:</strong> ${new Date(bookingDetails.createdAt).toLocaleString('en-IN')}</p>
-  </div>
-  
-  <p><strong>Quick Actions:</strong></p>
-  <ul>
-    <li><a href="tel:${bookingDetails.customerPhone}">📞 Call Customer</a></li>
-    <li><a href="mailto:${bookingDetails.customerEmail}">✉️ Email Customer</a></li>
-  </ul>
-</body>
-</html>
-    `;
-  }
-
-  /**
-   * Generate admin email text version
-   */
-  generateAdminEmailText(bookingDetails) {
-    return `
-NEW BOOKING ALERT - ${COMPANY_NAME}
-
-🚨 IMMEDIATE ACTION REQUIRED
-A new booking has been received and requires processing!
-
-⚠️ ACTION ITEMS:
-1. Contact customer to confirm pickup time
-2. Prepare vehicle for handover
-3. Update booking status in system
-
-📋 Booking Details:
-Booking ID: ${bookingDetails.bookingId}
-Customer: ${bookingDetails.customerName}
-Phone: ${bookingDetails.customerPhone}
-Email: ${bookingDetails.customerEmail}
-Vehicle: ${bookingDetails.vehicleName}
-Amount: ₹${bookingDetails.totalAmount}
-Booking Fee: ₹${bookingDetails.bookingFee || 10}
-Pickup: ${new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN')}
-Return: ${new Date(bookingDetails.returnDate).toLocaleDateString('en-IN')}
-Booked at: ${new Date(bookingDetails.createdAt).toLocaleString('en-IN')}
-
-Quick Actions:
-• Call customer: ${bookingDetails.customerPhone}
-• Email customer: ${bookingDetails.customerEmail}
-    `;
-  }
-
-  /**
-   * Send all notifications (Email + SMS to customer and admin)
-   */
-  async sendAllNotifications(bookingDetails) {
-    console.log('📧📱 sendAllNotifications called for:', bookingDetails.bookingId);
     
-    const results = {
-      customerEmail: { success: false },
-      customerSMS: { success: false },
-      adminEmail: { success: false },
-      adminSMS: { success: false }
+    <p>Need help? Call us at +91 70053 01679</p>
+    <p>Thank you for choosing MJ Car Rentals! 🚗</p>
+  `,
+
+  adminNotification: (booking) => `
+    <h3>📋 New Booking Alert!</h3>
+    
+    <div style="background: #f0f0f0; padding: 15px; border-radius: 8px;">
+      <p><strong>Booking ID:</strong> ${booking.bookingId}</p>
+      <p><strong>Customer:</strong> ${booking.customerName}</p>
+      <p><strong>Phone:</strong> ${booking.customerPhone}</p>
+      <p><strong>Email:</strong> ${booking.customerEmail}</p>
+      <p><strong>Vehicle:</strong> ${booking.vehicleName}</p>
+      <p><strong>Dates:</strong> ${new Date(booking.pickupDate).toLocaleDateString()} to ${new Date(booking.returnDate).toLocaleDateString()}</p>
+      <p><strong>Amount:</strong> ₹${booking.totalAmount}</p>
+      <p><strong>Booking Time:</strong> ${new Date(booking.createdAt).toLocaleString()}</p>
+    </div>
+    
+    <p style="color: #666; font-size: 12px;">This is an automated notification from MJ Car Rental System</p>
+  `
+};
+
+// SMS Templates
+const smsTemplates = {
+  customerConfirmation: (booking) => 
+    `🎉 Booking Confirmed! Booking ID: ${booking.bookingId}. Vehicle: ${booking.vehicleName}. Pickup: ${new Date(booking.pickupDate).toLocaleDateString()}. Balance: ₹${booking.totalAmount - 200} to pay at pickup. MJ Car Rentals - +917005301679`,
+
+  adminSMS: (booking) =>
+    `📋 New Booking: ${booking.bookingId}. ${booking.customerName} - ${booking.vehicleName}. Dates: ${new Date(booking.pickupDate).toLocaleDateString()}. Check admin panel for details.`
+};
+
+// Main notification function
+async function sendAllNotifications(bookingDetails) {
+  const results = {
+    email: { success: false, error: null },
+    sms: { success: false, error: null },
+    adminEmail: { success: false, error: null },
+    adminSMS: { success: false, error: null }
+  };
+
+  try {
+    console.log('🔔 Starting notifications for booking:', bookingDetails.bookingId);
+
+    // 1. Send email to customer
+    if (process.env.EMAIL_USER && process.env.EMAIL_PASSWORD) {
+      try {
+        const customerMailOptions = {
+          from: `"MJ Car Rentals" <${process.env.EMAIL_USER}>`,
+          to: bookingDetails.customerEmail,
+          subject: `Booking Confirmed - ${bookingDetails.bookingId}`,
+          html: emailTemplates.customerConfirmation(bookingDetails)
+        };
+
+        await transporter.sendMail(customerMailOptions);
+        results.email.success = true;
+        console.log('✅ Customer email sent to:', bookingDetails.customerEmail);
+      } catch (emailError) {
+        results.email.error = emailError.message;
+        console.error('❌ Customer email failed:', emailError.message);
+      }
+    }
+
+    // 2. Send SMS to customer
+    if (twilioClient && process.env.TWILIO_PHONE_NUMBER) {
+      try {
+        await twilioClient.messages.create({
+          body: smsTemplates.customerConfirmation(bookingDetails),
+          from: process.env.TWILIO_PHONE_NUMBER,
+          to: `+91${bookingDetails.customerPhone.replace(/\D/g, '')}`
+        });
+        results.sms.success = true;
+        console.log('✅ Customer SMS sent to:', bookingDetails.customerPhone);
+      } catch (smsError) {
+        results.sms.error = smsError.message;
+        console.error('❌ Customer SMS failed:', smsError.message);
+      }
+    }
+
+    // 3. Send email to admin
+    if (process.env.ADMIN_EMAIL && process.env.EMAIL_USER) {
+      try {
+        const adminMailOptions = {
+          from: `"MJ Car Rentals System" <${process.env.EMAIL_USER}>`,
+          to: process.env.ADMIN_EMAIL,
+          subject: `New Booking Alert - ${bookingDetails.bookingId}`,
+          html: emailTemplates.adminNotification(bookingDetails)
+        };
+
+        await transporter.sendMail(adminMailOptions);
+        results.adminEmail.success = true;
+        console.log('✅ Admin email sent to:', process.env.ADMIN_EMAIL);
+      } catch (adminEmailError) {
+        results.adminEmail.error = adminEmailError.message;
+        console.error('❌ Admin email failed:', adminEmailError.message);
+      }
+    }
+
+    // 4. Send SMS to admin
+    if (twilioClient && process.env.ADMIN_PHONE) {
+      try {
+        await twilioClient.messages.create({
+          body: smsTemplates.adminSMS(bookingDetails),
+          from: process.env.TWILIO_PHONE_NUMBER,
+          to: process.env.ADMIN_PHONE
+        });
+        results.adminSMS.success = true;
+        console.log('✅ Admin SMS sent to:', process.env.ADMIN_PHONE);
+      } catch (adminSMSError) {
+        results.adminSMS.error = adminSMSError.message;
+        console.error('❌ Admin SMS failed:', adminSMSError.message);
+      }
+    }
+
+    // Determine overall success
+    const overallSuccess = 
+      results.email.success || 
+      results.sms.success || 
+      results.adminEmail.success || 
+      results.adminSMS.success;
+
+    return {
+      success: overallSuccess,
+      results,
+      bookingId: bookingDetails.bookingId,
+      timestamp: new Date().toISOString()
     };
 
-    try {
-      // Check if email is configured
-      if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
-        console.error('❌ Email not configured in .env');
-        results.customerEmail.error = 'Email not configured';
-        results.adminEmail.error = 'Email not configured';
-      }
-
-      // Check if SMS is configured
-      if (!twilioClient) {
-        console.error('❌ SMS not configured - set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER');
-        results.customerSMS.error = 'SMS not configured';
-        results.adminSMS.error = 'SMS not configured';
-      }
-
-      // 1. Send email to customer
-      if (bookingDetails.customerEmail) {
-        results.customerEmail = await this.sendBookingEmailToCustomer(
-          bookingDetails.customerEmail, 
-          bookingDetails
-        );
-      } else {
-        results.customerEmail.error = 'No customer email provided';
-      }
-
-      // 2. Send SMS to customer
-      if (bookingDetails.customerPhone) {
-        results.customerSMS = await this.sendSMSToCustomer(
-          bookingDetails.customerPhone,
-          bookingDetails
-        );
-      } else {
-        results.customerSMS.error = 'No customer phone provided';
-      }
-
-      // 3. Send email to admin
-      if (ADMIN_EMAIL) {
-        results.adminEmail = await this.sendBookingEmailToAdmin(bookingDetails);
-      } else {
-        results.adminEmail.error = 'ADMIN_EMAIL not configured';
-      }
-
-      // 4. Send SMS to admin
-      if (ADMIN_PHONE) {
-        results.adminSMS = await this.sendSMSToAdmin(bookingDetails);
-      } else {
-        results.adminSMS.error = 'ADMIN_PHONE not configured';
-      }
-
-      // Count successes
-      const successful = Object.values(results).filter(r => r.success).length;
-      const totalAttempted = Object.keys(results).length;
-      
-      console.log(`📊 Notification Summary: ${successful}/${totalAttempted} successful`);
-      console.log('Results:', JSON.stringify(results, null, 2));
-
-      return {
-        success: successful > 0,
-        results: results,
-        summary: {
-          totalAttempted: totalAttempted,
-          successful: successful,
-          failed: totalAttempted - successful
-        }
-      };
-
-    } catch (error) {
-      console.error('🔥 Error in sendAllNotifications:', error);
-      return {
-        success: false,
-        error: error.message,
-        results: results
-      };
-    }
+  } catch (error) {
+    console.error('🔥 Error in sendAllNotifications:', error);
+    return {
+      success: false,
+      error: error.message,
+      bookingId: bookingDetails.bookingId
+    };
   }
 }
 
-// Export instance
-module.exports = new NotificationService();
+// Test function
+async function testNotifications() {
+  const testBooking = {
+    bookingId: 'TEST' + Date.now(),
+    customerName: 'Test Customer',
+    customerEmail: 'test@example.com',
+    customerPhone: '9876543210',
+    vehicleName: 'Test Vehicle',
+    pickupDate: new Date(),
+    returnDate: new Date(Date.now() + 86400000),
+    totalDays: 1,
+    totalAmount: 2010,
+    rentalAmount: 2000,
+    bookingFee: 10,
+    createdAt: new Date()
+  };
+
+  console.log('🧪 Testing notification system...');
+  const result = await sendAllNotifications(testBooking);
+  console.log('Test result:', result);
+  return result;
+}
+
+// Export functions
+module.exports = {
+  sendAllNotifications,
+  testNotifications,
+  emailTemplates,
+  smsTemplates
+};
