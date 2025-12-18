@@ -741,6 +741,132 @@ app.get('/api/admin/auth/verify', async (req, res) => {
     });
   }
 });
+app.post('/api/notifications/send-manual', async (req, res) => {
+  try {
+    const { bookingId, customerEmail, customerPhone, customerName, vehicleName, totalAmount } = req.body;
+    
+    if (!bookingId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Booking ID is required'
+      });
+    }
+    
+    // Check if booking exists
+    let booking = await Booking.findOne({ bookingId: bookingId });
+    let bookingDetails;
+    
+    if (booking) {
+      // Use actual booking data
+      bookingDetails = {
+        bookingId: booking.bookingId,
+        customerName: booking.customerName,
+        customerEmail: booking.customerEmail,
+        customerPhone: booking.customerPhone,
+        vehicleId: booking.vehicleId,
+        vehicleName: booking.vehicleName,
+        pickupDate: booking.pickupDate,
+        returnDate: booking.dropoffDate,
+        totalDays: booking.totalDays,
+        rentalAmount: booking.rentalAmount,
+        bookingFee: booking.bookingFee,
+        totalAmount: booking.totalAmount,
+        createdAt: booking.createdAt
+      };
+    } else {
+      // Use provided data or defaults
+      bookingDetails = {
+        bookingId: bookingId,
+        customerName: customerName || 'Customer',
+        customerEmail: customerEmail || 'customer@example.com',
+        customerPhone: customerPhone || '+919876543210',
+        vehicleName: vehicleName || 'Selected Vehicle',
+        totalAmount: totalAmount || 2010,
+        pickupDate: new Date(),
+        returnDate: new Date(Date.now() + 86400000),
+        totalDays: 2,
+        rentalAmount: 200,
+        bookingFee: 10,
+        createdAt: new Date()
+      };
+    }
+    
+    console.log('🔔 Sending manual notifications:', bookingDetails);
+    
+    const notificationResult = await notificationService.sendAllNotifications(bookingDetails);
+    
+    // Update booking if it exists
+    if (booking) {
+      booking.notificationsSent = true;
+      booking.notificationsTimestamp = new Date();
+      booking.notificationsStatus = notificationResult.success ? 'sent' : 'partial';
+      await booking.save();
+    }
+    
+    res.json({
+      success: true,
+      message: 'Manual notifications sent',
+      bookingDetails: bookingDetails,
+      notificationResult: notificationResult
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in manual notification:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to send manual notifications',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Check system notification configuration
+ */
+app.get('/api/notifications/config', async (req, res) => {
+  try {
+    const config = {
+      email: {
+        configured: !!process.env.EMAIL_USER,
+        user: process.env.EMAIL_USER ? 'Configured' : 'Not configured',
+        service: 'Gmail'
+      },
+      sms: {
+        configured: !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
+        accountSid: process.env.TWILIO_ACCOUNT_SID ? 'Configured' : 'Not configured',
+        phoneNumber: process.env.TWILIO_PHONE_NUMBER || 'Not configured'
+      },
+      admin: {
+        email: process.env.ADMIN_EMAIL || 'Not configured',
+        phone: process.env.ADMIN_PHONE || 'Not configured'
+      },
+      company: {
+        name: process.env.COMPANY_NAME || 'MJ Car Rentals',
+        phone: process.env.COMPANY_PHONE || 'Not configured',
+        address: process.env.COMPANY_ADDRESS || 'Not configured'
+      }
+    };
+    
+    res.json({
+      success: true,
+      message: 'Notification configuration',
+      config: config,
+      instructions: {
+        email: 'Set EMAIL_USER and EMAIL_PASSWORD in .env file',
+        sms: 'Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER in .env',
+        admin: 'Set ADMIN_EMAIL and ADMIN_PHONE for admin notifications'
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting notification config:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get notification configuration',
+      error: error.message
+    });
+  }
+});
 
 // Get Current Admin Profile
 app.get('/api/admin/auth/profile', async (req, res) => {
@@ -2221,6 +2347,7 @@ app.listen(PORT, () => {
     📊 Health Check: GET /api/health
   `);
 });
+
 
 
 
