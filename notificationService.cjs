@@ -1,6 +1,6 @@
-// notificationService.cjs - UPDATED WITH FAST2SMS
+// notificationService.cjs - UPDATED WITH SMS
 const nodemailer = require('nodemailer');
-const axios = require('axios');
+const twilio = require('twilio');
 
 console.log('📧📱 Notification Service (CJS) Loading...');
 
@@ -13,14 +13,23 @@ const transporter = nodemailer.createTransport({
   }
 });
 
+// Twilio SMS configuration
+let twilioClient = null;
+if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
+  twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  console.log('📱 Twilio SMS configured');
+} else {
+  console.log('⚠️ Twilio not configured - SMS notifications disabled');
+}
+
 // Company details
 const COMPANY_NAME = process.env.COMPANY_NAME || 'MJ Car Rentals';
 const COMPANY_PHONE = process.env.COMPANY_PHONE || '1234567890';
+const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER || '';
 const ADMIN_PHONE = process.env.ADMIN_PHONE || '';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || '';
 
 console.log('📧 Email configured for:', process.env.EMAIL_USER || 'Not configured');
-console.log('📱 SMS configured:', process.env.FAST2SMS_API_KEY ? 'Yes (Fast2SMS)' : 'No');
 
 class NotificationService {
   constructor() {
@@ -28,90 +37,41 @@ class NotificationService {
   }
 
   /**
-   * Send SMS via Fast2SMS
-   */
-  async sendFast2SMS(phoneNumber, message) {
-    try {
-      const apiKey = process.env.FAST2SMS_API_KEY;
-      if (!apiKey) {
-        console.log('⚠️ Fast2SMS API key not configured');
-        return { success: false, error: 'Fast2SMS API key not configured' };
-      }
-
-      // Format phone number
-      let phone = phoneNumber.toString().trim();
-      
-      // Remove any non-digit characters
-      phone = phone.replace(/\D/g, '');
-      
-      // Remove leading 0 if present
-      if (phone.startsWith('0')) {
-        phone = phone.substring(1);
-      }
-      
-      // Ensure it's 10 digits
-      if (phone.length !== 10) {
-        console.log('⚠️ Invalid phone number length:', phone);
-        return { success: false, error: 'Invalid phone number length. Must be 10 digits.' };
-      }
-      
-      // Fast2SMS requires 10-digit Indian numbers
-      // Format: 91XXXXXXXXXX (12 digits)
-      const formattedPhone = `91${phone}`;
-      
-      console.log('📱 Sending SMS via Fast2SMS to:', phone);
-      console.log('Message:', message.substring(0, 50) + '...');
-      
-      const response = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
-        sender_id: process.env.FAST2SMS_SENDER_ID || 'FSTSMS',
-        message: message,
-        language: "english",
-        route: "q", // q for promotional, t for transactional
-        numbers: formattedPhone
-      }, {
-        headers: {
-          'authorization': apiKey,
-          'Content-Type': 'application/json'
-        }
-      });
-
-      console.log('✅ Fast2SMS response:', response.data);
-      
-      if (response.data.return === true) {
-        return {
-          success: true,
-          service: 'fast2sms',
-          requestId: response.data.request_id,
-          messageId: response.data.message_id || response.data.request_id
-        };
-      } else {
-        return {
-          success: false,
-          service: 'fast2sms',
-          error: response.data.message || 'Unknown error'
-        };
-      }
-      
-    } catch (error) {
-      console.error('❌ Fast2SMS Error:', error.response?.data || error.message);
-      return {
-        success: false,
-        service: 'fast2sms',
-        error: error.response?.data?.message || error.message
-      };
-    }
-  }
-
-  /**
    * Send SMS to customer
    */
   async sendSMSToCustomer(customerPhone, bookingDetails) {
     try {
+      if (!twilioClient || !TWILIO_PHONE_NUMBER) {
+        console.log('⚠️ SMS not configured, skipping SMS to customer');
+        return { success: false, error: 'SMS not configured' };
+      }
+
       if (!customerPhone) {
         console.log('⚠️ Customer phone not provided');
         return { success: false, error: 'Customer phone not provided' };
       }
 
+      // Format phone number (remove +91 if present, add country code)
+      let phoneNumber = customerPhone.toString().trim();
+      
+      // Remove any non-digit characters
+      phoneNumber = phoneNumber.replace(/\D/g, '');
+      
+      // If starts with 0, remove it
+      if (phoneNumber.startsWith('0')) {
+        phoneNumber = phoneNumber.substring(1);
+      }
+      
+      // If doesn't start with country code, add India code (+91)
+      if (!phoneNumber.startsWith('91') && phoneNumber.length === 10) {
+        phoneNumber = `91${phoneNumber}`;
+      }
+      
+      // Add + prefix for Twilio
+      phoneNumber = `+${phoneNumber}`;
+      
+      console.log('📱 Sending SMS to:', phoneNumber);
+      
       // Format dates
       const pickupDate = new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN', {
         day: 'numeric',
@@ -131,17 +91,24 @@ Booking ID: ${bookingDetails.bookingId}
 Vehicle: ${bookingDetails.vehicleName}
 Dates: ${pickupDate} to ${returnDate}
 Amount: ₹${bookingDetails.totalAmount}
-Booking Fee: ₹${bookingDetails.bookingFee || 200} paid
-Balance: ₹${bookingDetails.totalAmount - (bookingDetails.bookingFee || 200)} at pickup
+Booking Fee: ₹${bookingDetails.bookingFee || 10} paid
+Balance: ₹${bookingDetails.totalAmount - (bookingDetails.bookingFee || 10)} at pickup
 
-Thank you for choosing ${COMPANY_NAME}! Call ${COMPANY_PHONE} for queries.
+Thank you for choosing ${COMPANY_NAME}! Call ${COMPANY_PHONE} for any queries.
       `.trim();
 
-      return await this.sendFast2SMS(customerPhone, message);
+      const response = await twilioClient.messages.create({
+        body: message,
+        from: TWILIO_PHONE_NUMBER,
+        to: phoneNumber
+      });
+
+      console.log('✅ SMS sent to customer:', response.sid);
+      return { success: true, messageId: response.sid, sid: response.sid };
       
     } catch (error) {
       console.error('❌ SMS to customer failed:', error.message);
-      return { success: false, error: error.message };
+      return { success: false, error: error.message, code: error.code };
     }
   }
 
@@ -150,14 +117,30 @@ Thank you for choosing ${COMPANY_NAME}! Call ${COMPANY_PHONE} for queries.
    */
   async sendSMSToAdmin(bookingDetails) {
     try {
-      if (!ADMIN_PHONE) {
-        console.log('⚠️ ADMIN_PHONE not configured');
-        return { success: false, error: 'ADMIN_PHONE not configured' };
+      if (!twilioClient || !TWILIO_PHONE_NUMBER || !ADMIN_PHONE) {
+        console.log('⚠️ SMS not configured, skipping SMS to admin');
+        return { success: false, error: 'SMS not configured' };
       }
 
+      // Format phone number
+      let phoneNumber = ADMIN_PHONE.toString().trim();
+      phoneNumber = phoneNumber.replace(/\D/g, '');
+      
+      if (phoneNumber.startsWith('0')) {
+        phoneNumber = phoneNumber.substring(1);
+      }
+      
+      if (!phoneNumber.startsWith('91') && phoneNumber.length === 10) {
+        phoneNumber = `91${phoneNumber}`;
+      }
+      
+      phoneNumber = `+${phoneNumber}`;
+      
+      console.log('📱 Sending SMS to admin:', phoneNumber);
+
       const message = `
-🚨 NEW BOOKING!
-ID: ${bookingDetails.bookingId}
+🚨 NEW BOOKING ALERT!
+Booking ID: ${bookingDetails.bookingId}
 Customer: ${bookingDetails.customerName}
 Phone: ${bookingDetails.customerPhone}
 Vehicle: ${bookingDetails.vehicleName}
@@ -165,7 +148,14 @@ Amount: ₹${bookingDetails.totalAmount}
 Pickup: ${new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN')}
       `.trim();
 
-      return await this.sendFast2SMS(ADMIN_PHONE, message);
+      const response = await twilioClient.messages.create({
+        body: message,
+        from: TWILIO_PHONE_NUMBER,
+        to: phoneNumber
+      });
+
+      console.log('✅ SMS sent to admin:', response.sid);
+      return { success: true, messageId: response.sid, sid: response.sid };
       
     } catch (error) {
       console.error('❌ SMS to admin failed:', error.message);
@@ -256,47 +246,55 @@ Pickup: ${new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN')}
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Booking Confirmation - ${COMPANY_NAME}</title>
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+    .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }
+    .booking-details { background: white; border-radius: 8px; padding: 20px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    .highlight { color: #667eea; font-weight: bold; }
+    .footer { text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; color: #666; font-size: 14px; }
+    .cta-button { display: inline-block; background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; margin: 20px 0; }
+  </style>
 </head>
 <body>
-  <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto;">
-    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
-      <h1>🎉 Booking Confirmed!</h1>
-      <p>Dear ${bookingDetails.customerName},</p>
+  <div class="header">
+    <h1>🎉 Booking Confirmed!</h1>
+    <p>Dear ${bookingDetails.customerName},</p>
+  </div>
+  
+  <div class="content">
+    <p>Your booking has been successfully confirmed! Here are your booking details:</p>
+    
+    <div class="booking-details">
+      <h2>📋 Booking Summary</h2>
+      <p><strong>Booking ID:</strong> <span class="highlight">${bookingDetails.bookingId}</span></p>
+      <p><strong>Vehicle:</strong> ${bookingDetails.vehicleName}</p>
+      <p><strong>Pickup Date:</strong> ${pickupDate}</p>
+      <p><strong>Return Date:</strong> ${returnDate}</p>
+      <p><strong>Duration:</strong> ${bookingDetails.totalDays || '1'} day(s)</p>
+      
+      <h3>💰 Payment Summary</h3>
+      <p><strong>Total Rental Amount:</strong> ₹${bookingDetails.totalAmount}</p>
+      <p><strong>Booking Fee Paid:</strong> ₹${bookingDetails.bookingFee || 10}</p>
+      <p><strong>Balance to Pay at Pickup:</strong> ₹${bookingDetails.totalAmount - (bookingDetails.bookingFee || 10)}</p>
     </div>
     
-    <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
-      <p>Your booking has been successfully confirmed! Here are your booking details:</p>
-      
-      <div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-        <h2>📋 Booking Summary</h2>
-        <p><strong>Booking ID:</strong> ${bookingDetails.bookingId}</p>
-        <p><strong>Vehicle:</strong> ${bookingDetails.vehicleName}</p>
-        <p><strong>Pickup Date:</strong> ${pickupDate}</p>
-        <p><strong>Return Date:</strong> ${returnDate}</p>
-        <p><strong>Duration:</strong> ${bookingDetails.totalDays || '1'} day(s)</p>
-        
-        <h3>💰 Payment Summary</h3>
-        <p><strong>Total Rental Amount:</strong> ₹${bookingDetails.totalAmount}</p>
-        <p><strong>Booking Fee Paid:</strong> ₹${bookingDetails.bookingFee || 200}</p>
-        <p><strong>Balance to Pay at Pickup:</strong> ₹${bookingDetails.totalAmount - (bookingDetails.bookingFee || 200)}</p>
-      </div>
-      
-      <p><strong>📱 Important Notes:</strong></p>
-      <ul>
-        <li>Please bring your original driving license and ID proof (Aadhar/Passport)</li>
-        <li>Pay the remaining balance at vehicle pickup</li>
-        <li>For any changes, contact us at least 24 hours before pickup</li>
-      </ul>
-      
-      <p><strong>📞 Contact Information:</strong></p>
-      <p>${COMPANY_NAME}<br>
-      Phone: ${COMPANY_PHONE}<br>
-      Email: ${process.env.EMAIL_USER}</p>
-      
-      <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; color: #666;">
-        <p>Thank you for choosing ${COMPANY_NAME}!</p>
-        <p>Safe travels! 🚗💨</p>
-      </div>
+    <p><strong>📱 Important Notes:</strong></p>
+    <ul>
+      <li>Please bring your original driving license and ID proof (Aadhar/Passport)</li>
+      <li>Pay the remaining balance at vehicle pickup</li>
+      <li>Vehicle will be handed over at our office: [Your Address]</li>
+      <li>For any changes, contact us at least 24 hours before pickup</li>
+    </ul>
+    
+    <p><strong>📞 Contact Information:</strong></p>
+    <p>${COMPANY_NAME}<br>
+    Phone: ${COMPANY_PHONE}<br>
+    Email: ${process.env.EMAIL_USER}</p>
+    
+    <div class="footer">
+      <p>Thank you for choosing ${COMPANY_NAME}!</p>
+      <p>Safe travels! 🚗💨</p>
     </div>
   </div>
 </body>
@@ -324,12 +322,13 @@ Duration: ${bookingDetails.totalDays || '1'} day(s)
 
 💰 Payment Summary:
 Total Rental Amount: ₹${bookingDetails.totalAmount}
-Booking Fee Paid: ₹${bookingDetails.bookingFee || 200}
-Balance to Pay at Pickup: ₹${bookingDetails.totalAmount - (bookingDetails.bookingFee || 200)}
+Booking Fee Paid: ₹${bookingDetails.bookingFee || 10}
+Balance to Pay at Pickup: ₹${bookingDetails.totalAmount - (bookingDetails.bookingFee || 10)}
 
 📱 Important Notes:
 • Please bring your original driving license and ID proof (Aadhar/Passport)
 • Pay the remaining balance at vehicle pickup
+• Vehicle will be handed over at our office
 • For any changes, contact us at least 24 hours before pickup
 
 📞 Contact Information:
@@ -353,16 +352,23 @@ Safe travels! 🚗💨
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NEW BOOKING - ${COMPANY_NAME}</title>
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+    .alert { background: #fff3cd; border: 1px solid #ffeaa7; padding: 20px; border-radius: 8px; margin: 20px 0; }
+    .booking-info { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; }
+    .highlight { color: #e74c3c; font-weight: bold; }
+    .action-required { background: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px; margin: 10px 0; }
+  </style>
 </head>
-<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+<body>
   <h1>🚨 NEW BOOKING ALERT</h1>
   
-  <div style="background: #fff3cd; border: 1px solid #ffeaa7; padding: 20px; border-radius: 8px; margin: 20px 0;">
+  <div class="alert">
     <h2>IMMEDIATE ACTION REQUIRED</h2>
     <p>A new booking has been received and requires processing!</p>
   </div>
   
-  <div style="background: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px; margin: 10px 0;">
+  <div class="action-required">
     <strong>⚠️ ACTION ITEMS:</strong>
     <ol>
       <li>Contact customer to confirm pickup time</li>
@@ -371,15 +377,15 @@ Safe travels! 🚗💨
     </ol>
   </div>
   
-  <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+  <div class="booking-info">
     <h2>📋 Booking Details</h2>
-    <p><strong>Booking ID:</strong> ${bookingDetails.bookingId}</p>
+    <p><strong>Booking ID:</strong> <span class="highlight">${bookingDetails.bookingId}</span></p>
     <p><strong>Customer Name:</strong> ${bookingDetails.customerName}</p>
     <p><strong>Customer Phone:</strong> ${bookingDetails.customerPhone}</p>
     <p><strong>Customer Email:</strong> ${bookingDetails.customerEmail}</p>
     <p><strong>Vehicle:</strong> ${bookingDetails.vehicleName}</p>
     <p><strong>Total Amount:</strong> ₹${bookingDetails.totalAmount}</p>
-    <p><strong>Booking Fee Paid:</strong> ₹${bookingDetails.bookingFee || 200}</p>
+    <p><strong>Booking Fee Paid:</strong> ₹${bookingDetails.bookingFee || 10}</p>
     <p><strong>Pickup Date:</strong> ${new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN')}</p>
     <p><strong>Return Date:</strong> ${new Date(bookingDetails.returnDate).toLocaleDateString('en-IN')}</p>
     <p><strong>Booked at:</strong> ${new Date(bookingDetails.createdAt).toLocaleString('en-IN')}</p>
@@ -417,7 +423,7 @@ Phone: ${bookingDetails.customerPhone}
 Email: ${bookingDetails.customerEmail}
 Vehicle: ${bookingDetails.vehicleName}
 Amount: ₹${bookingDetails.totalAmount}
-Booking Fee: ₹${bookingDetails.bookingFee || 200}
+Booking Fee: ₹${bookingDetails.bookingFee || 10}
 Pickup: ${new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN')}
 Return: ${new Date(bookingDetails.returnDate).toLocaleDateString('en-IN')}
 Booked at: ${new Date(bookingDetails.createdAt).toLocaleString('en-IN')}
@@ -442,6 +448,20 @@ Quick Actions:
     };
 
     try {
+      // Check if email is configured
+      if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+        console.error('❌ Email not configured in .env');
+        results.customerEmail.error = 'Email not configured';
+        results.adminEmail.error = 'Email not configured';
+      }
+
+      // Check if SMS is configured
+      if (!twilioClient) {
+        console.error('❌ SMS not configured - set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER');
+        results.customerSMS.error = 'SMS not configured';
+        results.adminSMS.error = 'SMS not configured';
+      }
+
       // 1. Send email to customer
       if (bookingDetails.customerEmail) {
         results.customerEmail = await this.sendBookingEmailToCustomer(
@@ -501,14 +521,6 @@ Quick Actions:
         results: results
       };
     }
-  }
-
-  /**
-   * Test SMS service
-   */
-  async testSMS(phoneNumber, message = 'Test SMS from MJ Car Rentals') {
-    console.log('🧪 Testing SMS service...');
-    return await this.sendFast2SMS(phoneNumber, message);
   }
 }
 
