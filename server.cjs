@@ -1374,6 +1374,7 @@ app.post('/api/create-razorpay-order', async (req, res) => {
 // Verify payment with notifications
 app.post('/api/verify-payment', async (req, res) => {
   try {
+    
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, bookingId } = req.body;
     
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !bookingId) {
@@ -1401,78 +1402,60 @@ app.post('/api/verify-payment', async (req, res) => {
     
     const isValid = expectedSignature === razorpay_signature;
     
-    if (isValid) {
-      // Update booking
+     if (isValid) {
+      // Update booking status
       booking.razorpayPaymentId = razorpay_payment_id;
       booking.razorpaySignature = razorpay_signature;
       booking.paymentStatus = 'paid';
       booking.status = 'confirmed';
       booking.paymentTimestamp = new Date();
       
-      // Add to status history
-      booking.statusHistory.push({
-        status: 'confirmed',
-        timestamp: new Date(),
-        actionBy: 'system',
-        notes: 'Payment verified and booking confirmed'
-      });
-      
       await booking.save();
       
       console.log('✅ Payment verified for booking:', bookingId);
       
-      // Prepare booking details for notifications
-      const bookingDetails = {
-        bookingId: booking.bookingId,
-        customerName: booking.customerName,
-        customerEmail: booking.customerEmail,
-        customerPhone: booking.customerPhone,
-        vehicleId: booking.vehicleId,
-        vehicleName: booking.vehicleName,
-        pickupDate: booking.pickupDate,
-        returnDate: booking.dropoffDate,
-        totalDays: booking.totalDays,
-        rentalAmount: booking.rentalAmount,
-        bookingFee: booking.bookingFee,
-        totalAmount: booking.totalAmount,
-        createdAt: booking.createdAt
-      };
-      
-      // Send notifications ASYNC (don't wait for response)
-      notificationService.sendAllNotifications(bookingDetails)
-        .then(result => {
-          console.log('📧 Notifications sent for booking:', bookingId, 
-            result.success ? 'Success' : 'Partial success');
-          
-          // Update booking with notification status
-          booking.notificationsSent = true;
-          booking.notificationsTimestamp = new Date();
-          booking.notificationsStatus = result.success ? 'sent' : 'partial';
-          booking.save();
-        })
-        .catch(err => {
-          console.error('⚠️ Notifications failed for booking:', bookingId, err.message);
-          
-          // Still mark as partial
-          booking.notificationsSent = false;
-          booking.notificationsStatus = 'failed';
-          booking.save();
-        });
+      // === ADD NOTIFICATION CODE HERE ===
+      try {
+        console.log('📧📱 SENDING NOTIFICATIONS...');
+        
+        // Prepare booking details
+        const bookingDetails = {
+          bookingId: booking.bookingId,
+          customerName: booking.customerName,
+          customerEmail: booking.customerEmail,
+          customerPhone: booking.customerPhone,
+          vehicleName: booking.vehicleName || 'Selected Vehicle',
+          pickupDate: booking.pickupDate,
+          returnDate: booking.dropoffDate,
+          totalAmount: booking.totalAmount || 2010,
+          bookingFee: booking.bookingFee || 10,
+          totalDays: booking.totalDays || 1,
+          createdAt: booking.createdAt || new Date()
+        };
+        
+        // Send notifications
+        const notificationResult = await notificationService.sendAllNotifications(bookingDetails);
+        
+        // Update booking with notification status
+        booking.notificationsSent = true;
+        booking.notificationsTimestamp = new Date();
+        booking.notificationsStatus = notificationResult.success ? 'sent' : 'failed';
+        await booking.save();
+        
+        console.log('📊 Notification result:', notificationResult.success ? 'SUCCESS' : 'FAILED');
+        
+      } catch (notifyError) {
+        console.error('❌ Notification error:', notifyError.message);
+        booking.notificationsStatus = 'failed';
+        await booking.save();
+      }
+      // === END NOTIFICATION CODE ===
       
       res.json({
         success: true,
-        message: 'Payment successful! Booking confirmed. Check your email and phone for confirmation.',
+        message: 'Payment successful! Booking confirmed.',
         paymentId: razorpay_payment_id,
-        bookingId: bookingId,
-        notifications: 'Notifications are being sent...',
-        booking: {
-          id: booking._id,
-          bookingId: booking.bookingId,
-          customerName: booking.customerName,
-          vehicleName: booking.vehicleName,
-          status: booking.status,
-          paymentStatus: booking.paymentStatus
-        }
+        bookingId: bookingId
       });
     } else {
       res.status(400).json({ 
@@ -1486,7 +1469,39 @@ app.post('/api/verify-payment', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
+// Add this route in server.cjs (anywhere after other routes)
+app.post('/api/test-notify', async (req, res) => {
+  try {
+    console.log('🧪 Testing notification system...');
+    
+    const testBooking = {
+      bookingId: 'TEST' + Date.now(),
+      customerName: 'Test Customer',
+      customerEmail: 'test@example.com',  // Change to your email for testing
+      customerPhone: '9876543210',        // Change to your phone for testing
+      vehicleName: 'Toyota Innova',
+      pickupDate: new Date(),
+      returnDate: new Date(Date.now() + 86400000),
+      totalAmount: 2010,
+      bookingFee: 10,
+      totalDays: 1,
+      createdAt: new Date()
+    };
+    
+    const result = await notificationService.sendAllNotifications(testBooking);
+    
+    res.json({
+      success: true,
+      message: 'Test completed',
+      result: result,
+      testData: testBooking
+    });
+    
+  } catch (error) {
+    console.error('Test error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 // ==================== NOTIFICATION ROUTES ====================
 
 // Send notifications for a booking
@@ -2347,6 +2362,7 @@ app.listen(PORT, () => {
     📊 Health Check: GET /api/health
   `);
 });
+
 
 
 
