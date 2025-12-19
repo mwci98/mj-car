@@ -1362,7 +1362,7 @@ app.post('/api/create-razorpay-order', async (req, res) => {
     
     // Create REAL Razorpay order
     const options = {
-      amount: amount * 100, // Convert to paise
+      amount: amount , // Convert to paise
       currency: 'INR',
       receipt: `receipt_${bookingId}`,
       notes: {
@@ -3008,3 +3008,4 @@ app.listen(PORT, () => {
     ✅ API Status: http://localhost:${PORT}/api/health
   `);
 });
+
