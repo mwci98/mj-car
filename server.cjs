@@ -1,5 +1,4 @@
-// server.cjs - COMPLETE CODE WITH ADMIN ENDPOINTS
-
+// server.cjs - COMPLETE COMBINED VERSION WITH ADMIN AUTH & ALL FEATURES
 // Load environment variables FIRST
 require('dotenv').config();
 
@@ -8,13 +7,15 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:8000'],
+  origin: ['http://localhost:3000', 'https://mj.neospec.co.in', 'http://localhost:5173', 'http://localhost:8000'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
@@ -49,13 +50,16 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET || '2ioiB49UCk1wnZFOGBLrBxhX'
 });
 
-// Vehicle Schema
+// ==================== SCHEMAS ====================
+
+// Vehicle Schema WITH QUANTITY FIELD
 const vehicleSchema = new mongoose.Schema({
   name: String,
   type: String,
   capacity: Number,
   transmission: String,
   dailyRate: Number,
+  quantity: { type: Number, default: 1 }, // ✅ CRITICAL: Added from File 1
   isAvailable: { type: Boolean, default: true },
   features: [String],
   image: String
@@ -63,7 +67,64 @@ const vehicleSchema = new mongoose.Schema({
 
 const Vehicle = mongoose.model('Vehicle', vehicleSchema);
 
-// ==================== UPDATED BOOKING SCHEMA ====================
+// Admin User Schema
+const adminSchema = new mongoose.Schema({
+  username: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    lowercase: true
+  },
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true
+  },
+  password_hash: {
+    type: String,
+    required: true
+  },
+  full_name: {
+    type: String,
+    required: true
+  },
+  role: {
+    type: String,
+    enum: ['super_admin', 'admin', 'manager', 'viewer'],
+    default: 'admin'
+  },
+  is_active: {
+    type: Boolean,
+    default: true
+  },
+  phone: String,
+  permissions: [String],
+  last_login: Date,
+  login_attempts: {
+    type: Number,
+    default: 0
+  },
+  locked_until: Date,
+  created_at: {
+    type: Date,
+    default: Date.now
+  },
+  updated_at: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+// Pre-save middleware
+adminSchema.pre('save', function(next) {
+  this.updated_at = Date.now();
+  next();
+});
+
+const Admin = mongoose.model('admin_users', adminSchema);
+
 // Booking Schema with ALL admin fields
 const bookingSchema = new mongoose.Schema({
   // Basic booking info
@@ -168,38 +229,616 @@ const bookingSchema = new mongoose.Schema({
   }]
 }, { 
   timestamps: true,
-  // Add this to handle any extra fields gracefully
   strict: false 
 });
 
 const Booking = mongoose.model('Booking', bookingSchema);
 
-// ==================== ROUTES ====================
+// Vehicle Payment Schema
+const vehiclePaymentSchema = new mongoose.Schema({
+  vehicleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Vehicle' },
+  razorpayOrderId: String,
+  razorpayPaymentId: String,
+  razorpaySignature: String,
+  amount: Number,
+  status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
+  registrationFee: { type: Boolean, default: false },
+  processedAt: Date
+}, { timestamps: true });
+
+const VehiclePayment = mongoose.model('VehiclePayment', vehiclePaymentSchema);
+
+// ==================== AUTHENTICATION MIDDLEWARE ====================
+
+const authenticateAdmin = (requiredRole = null) => {
+  return async (req, res, next) => {
+    try {
+      // Get token from header
+      const authHeader = req.headers.authorization;
+      
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({
+          success: false,
+          message: 'Access denied. No token provided.'
+        });
+      }
+      
+      const token = authHeader.split(' ')[1];
+      
+      // Verify token
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-this');
+      
+      // Find admin
+      const admin = await Admin.findById(decoded.id);
+      
+      if (!admin) {
+        return res.status(401).json({
+          success: false,
+          message: 'Admin not found'
+        });
+      }
+      
+      if (!admin.is_active) {
+        return res.status(401).json({
+          success: false,
+          message: 'Account is deactivated'
+        });
+      }
+      
+      // Check role if required
+      if (requiredRole && admin.role !== requiredRole) {
+        return res.status(403).json({
+          success: false,
+          message: 'Insufficient permissions'
+        });
+      }
+      
+      // Add admin to request
+      req.admin = admin;
+      next();
+      
+    } catch (error) {
+      console.error('Authentication error:', error);
+      
+      if (error.name === 'TokenExpiredError') {
+        return res.status(401).json({
+          success: false,
+          message: 'Token expired'
+        });
+      }
+      
+      if (error.name === 'JsonWebTokenError') {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid token'
+        });
+      }
+      
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication failed'
+      });
+    }
+  };
+};
+
+// ==================== HELPER FUNCTIONS ====================
+
+// Helper function to check vehicle availability (FROM FILE 1 WITH IMPROVEMENTS)
+async function checkVehicleAvailability(vehicleId, startDate, endDate, excludeBookingId = null) {
+  try {
+    console.log('=== AVAILABILITY CHECK START ===');
+    console.log('Vehicle ID:', vehicleId);
+    console.log('Start Date:', startDate.toISOString());
+    console.log('End Date:', endDate.toISOString());
+    
+    // Find vehicle with explicit field selection
+    const vehicle = await Vehicle.findById(vehicleId).select('name quantity');
+    
+    if (!vehicle) {
+      console.log('❌ Vehicle not found');
+      return { available: false, availableQuantity: 0, vehicleQuantity: 0 };
+    }
+    
+    // Debug: Log the vehicle object
+    console.log('Vehicle object:', vehicle);
+    console.log('Vehicle JSON:', JSON.stringify(vehicle, null, 2));
+    console.log(`Vehicle: ${vehicle.name}, Quantity: ${vehicle.quantity}`);
+    
+    // Make sure quantity is a number
+    const quantity = Number(vehicle.quantity) || 1;
+    console.log(`Parsed quantity: ${quantity} (Type: ${typeof quantity})`);
+    
+    // Build query for overlapping bookings - EXCLUDE PENDING BOOKINGS (IMPROVED)
+    const query = {
+      vehicleId: vehicleId,
+      // ✅ ONLY count confirmed and active bookings
+      status: { $in: ['confirmed', 'handed_over', 'in_use', 'overdue'] }
+    };
+    
+    // Date overlap condition
+    query.$or = [
+      {
+        pickupDate: { $lte: endDate },
+        dropoffDate: { $gte: startDate }
+      }
+    ];
+    
+    if (excludeBookingId) {
+      query._id = { $ne: excludeBookingId };
+    }
+    
+    console.log('Query:', JSON.stringify(query, null, 2));
+    
+    const overlappingBookings = await Booking.find(query);
+    console.log(`Found ${overlappingBookings.length} overlapping ACTIVE bookings`);
+    
+    // If no overlapping bookings, all vehicles are available
+    if (overlappingBookings.length === 0) {
+      console.log(`✅ No overlapping ACTIVE bookings. All ${quantity} vehicles available.`);
+      console.log('=== AVAILABILITY CHECK END ===');
+      return {
+        available: true,
+        availableQuantity: quantity,
+        vehicleQuantity: quantity,
+        bookedQuantity: 0
+      };
+    }
+    
+    // Calculate day-by-day bookings
+    const dateBookings = {};
+    
+    // Initialize all dates in range
+    const currentDate = new Date(startDate);
+    while (currentDate <= endDate) {
+      const dateStr = currentDate.toISOString().split('T')[0];
+      dateBookings[dateStr] = 0;
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+    
+    console.log('Date range initialized:', Object.keys(dateBookings).length, 'days');
+    
+    // Count bookings for each day
+    overlappingBookings.forEach((booking, index) => {
+      console.log(`\nBooking ${index + 1}:`);
+      console.log(`- Booking ID: ${booking.bookingId}`);
+      console.log(`- Status: ${booking.status}`);
+      console.log(`- Pickup: ${booking.pickupDate}`);
+      console.log(`- Dropoff: ${booking.dropoffDate}`);
+      
+      const bookingStart = new Date(booking.pickupDate);
+      const bookingEnd = new Date(booking.dropoffDate);
+      
+      // Reset hours to avoid timezone issues
+      bookingStart.setHours(0, 0, 0, 0);
+      bookingEnd.setHours(0, 0, 0, 0);
+      
+      let current = new Date(bookingStart);
+      while (current <= bookingEnd) {
+        const dateStr = current.toISOString().split('T')[0];
+        if (dateBookings[dateStr] !== undefined) {
+          dateBookings[dateStr]++;
+        }
+        current.setDate(current.getDate() + 1);
+      }
+    });
+    
+    console.log('\nDate-wise bookings:', dateBookings);
+    
+    // Find maximum concurrent bookings on any day
+    const bookingCounts = Object.values(dateBookings);
+    const maxConcurrentBookings = bookingCounts.length > 0 ? Math.max(...bookingCounts) : 0;
+    const availableQuantity = quantity - maxConcurrentBookings;
+    
+    console.log(`\nSummary:`);
+    console.log(`- Vehicle quantity: ${quantity}`);
+    console.log(`- Max concurrent bookings: ${maxConcurrentBookings}`);
+    console.log(`- Available quantity: ${availableQuantity}`);
+    console.log(`- Is available: ${availableQuantity > 0}`);
+    
+    console.log('=== AVAILABILITY CHECK END ===');
+    
+    return {
+      available: availableQuantity > 0,
+      availableQuantity: Math.max(0, availableQuantity),
+      vehicleQuantity: quantity,
+      bookedQuantity: maxConcurrentBookings,
+      dateBookings: dateBookings,
+      overlappingBookingsCount: overlappingBookings.length
+    };
+    
+  } catch (error) {
+    console.error('❌ Error in checkVehicleAvailability:', error);
+    throw error;
+  }
+}
+
+// Helper function to find booking by either bookingId or _id
+const findBooking = async (identifier) => {
+  // First try to find by bookingId
+  let booking = await Booking.findOne({ bookingId: identifier });
+  
+  // If not found, try by MongoDB _id
+  if (!booking) {
+    booking = await Booking.findById(identifier);
+  }
+  
+  return booking;
+};
+
+// Helper function for fuel charges
+function calculateFuelCharge(startLevel, endLevel) {
+  const fuelPrices = {
+    'empty': 3000, // Full tank price
+    'quarter': 2250,
+    'half': 1500,
+    'three_quarter': 750,
+    'full': 0
+  };
+  
+  const startPrice = fuelPrices[startLevel] || 0;
+  const endPrice = fuelPrices[endLevel] || 0;
+  
+  return Math.max(0, startPrice - endPrice);
+}
+
+// ==================== ADMIN AUTH ROUTES ====================
+
+// Admin setup endpoint (create admin if doesn't exist)
+app.post('/api/admin/setup', async (req, res) => {
+  try {
+    console.log('🔧 Setting up admin user...');
+    
+    // Check if admin already exists
+    let admin = await Admin.findOne({ username: 'admin' });
+    
+    if (admin) {
+      console.log('ℹ️ Admin already exists:', admin.username);
+      return res.json({
+        success: true,
+        message: 'Admin already exists',
+        admin: {
+          username: admin.username,
+          email: admin.email,
+          role: admin.role
+        }
+      });
+    }
+    
+    // Create new admin user
+    const password = 'Admin@123';
+    const hash = await bcrypt.hash(password, 10);
+    
+    admin = new Admin({
+      username: 'admin',
+      email: 'admin@mjcarrental.com',
+      password_hash: hash,
+      full_name: 'Administrator',
+      role: 'super_admin',
+      is_active: true,
+      phone: '+919876543210',
+      permissions: [
+        'view_dashboard',
+        'view_bookings',
+        'create_bookings',
+        'edit_bookings',
+        'manage_vehicles',
+        'manage_customers',
+        'view_reports',
+        'manage_admins'
+      ],
+      created_at: new Date(),
+      updated_at: new Date()
+    });
+    
+    await admin.save();
+    
+    console.log('✅ Admin created successfully!');
+    
+    res.json({
+      success: true,
+      message: 'Admin user created successfully',
+      credentials: {
+        username: 'admin',
+        password: 'Admin@123',
+        email: 'admin@mjcarrental.com'
+      },
+      note: 'Use these credentials to login'
+    });
+    
+  } catch (error) {
+    console.error('❌ Setup error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Check admin endpoint
+app.get('/api/admin/check', async (req, res) => {
+  try {
+    const admin = await Admin.findOne({ username: 'admin' });
+    
+    if (!admin) {
+      return res.json({
+        success: false,
+        message: 'Admin user not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      admin: {
+        id: admin._id,
+        username: admin.username,
+        email: admin.email,
+        role: admin.role,
+        is_active: admin.is_active,
+        password_hash: admin.password_hash.substring(0, 30) + '...'
+      }
+    });
+  } catch (error) {
+    console.error('Check error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Admin Login Route - SIMPLIFIED FIXED VERSION
+app.post('/api/admin/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    console.log('🔐 Login attempt for:', username);
+    
+    if (!username || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Username and password are required'
+      });
+    }
+    
+    // Find admin user
+    const admin = await Admin.findOne({ 
+      $or: [
+        { username: username.toLowerCase().trim() },
+        { email: username.toLowerCase().trim() }
+      ]
+    });
+    
+    if (!admin) {
+      console.log('❌ Admin not found for:', username);
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid username or email'
+      });
+    }
+    
+    console.log('✅ Admin found:', {
+      id: admin._id,
+      username: admin.username,
+      email: admin.email,
+      is_active: admin.is_active,
+      role: admin.role
+    });
+    
+    // Check if account is active
+    if (!admin.is_active) {
+      return res.status(401).json({
+        success: false,
+        message: 'Account is deactivated'
+      });
+    }
+    
+    // Compare password using bcrypt
+    console.log('🔄 Comparing password...');
+    const isValidPassword = await bcrypt.compare(password, admin.password_hash);
+    console.log('🔐 Password valid?', isValidPassword);
+    
+    if (!isValidPassword) {
+      console.log('❌ Invalid password for:', username);
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid password'
+      });
+    }
+    
+    // Update last login
+    admin.last_login = new Date();
+    admin.login_attempts = 0;
+    await admin.save();
+    
+    // Create JWT token
+    const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
+    console.log('📝 Creating JWT with secret length:', JWT_SECRET ? JWT_SECRET.length : 0);
+    
+    const token = jwt.sign(
+      { 
+        id: admin._id, 
+        username: admin.username,
+        role: admin.role,
+        permissions: admin.permissions || []
+      },
+      JWT_SECRET,
+      { expiresIn: '8h' }
+    );
+    
+    console.log('✅ Login successful for:', username);
+    console.log('📱 Token created (first 50 chars):', token.substring(0, 50) + '...');
+    
+    res.json({
+      success: true,
+      message: 'Login successful',
+      token,
+      admin: {
+        id: admin._id,
+        username: admin.username,
+        email: admin.email,
+        full_name: admin.full_name,
+        role: admin.role,
+        permissions: admin.permissions || [],
+        phone: admin.phone
+      }
+    });
+    
+  } catch (error) {
+    console.error('🔥 Login error:', error.message);
+    console.error('Stack:', error.stack);
+    
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Admin Logout Route
+app.post('/api/admin/auth/logout', (req, res) => {
+  res.json({ 
+    success: true, 
+    message: 'Logged out successfully' 
+  });
+});
+
+// Verify Admin Token
+app.get('/api/admin/auth/verify', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        valid: false, 
+        message: 'No token provided' 
+      });
+    }
+    
+    const token = authHeader.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-this');
+    
+    const admin = await Admin.findById(decoded.id).select('-password_hash');
+    
+    if (!admin) {
+      return res.status(401).json({ 
+        valid: false, 
+        message: 'Admin not found' 
+      });
+    }
+    
+    if (!admin.is_active) {
+      return res.status(401).json({ 
+        valid: false, 
+        message: 'Account is deactivated' 
+      });
+    }
+    
+    res.json({ 
+      valid: true, 
+      admin,
+      token: token 
+    });
+    
+  } catch (error) {
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ 
+        valid: false, 
+        message: 'Token expired' 
+      });
+    }
+    
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({ 
+        valid: false, 
+        message: 'Invalid token' 
+      });
+    }
+    
+    console.error('Token verification error:', error);
+    res.status(500).json({ 
+      valid: false, 
+      message: 'Server error' 
+    });
+  }
+});
+
+// Get Current Admin Profile
+app.get('/api/admin/auth/profile', authenticateAdmin(), async (req, res) => {
+  try {
+    const admin = await Admin.findById(req.admin._id).select('-password_hash');
+    
+    res.json({
+      success: true,
+      admin
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// ==================== BASIC ROUTES ====================
 
 // Home route
-
 app.get('/', (req, res) => {
   res.json({ 
     message: '🚗 MJ Car Rentals API',
     status: 'running',
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
     endpoints: {
-      vehicles: 'GET /api/vehicles',
-      availableVehicles: 'GET /api/vehicles/available',
-      checkAvailability: 'POST /api/vehicles/availability',
-      vehicleAvailability: 'POST /api/vehicles/:id/availability',
-      unavailableDates: 'GET /api/vehicles/:id/unavailable-dates',
-      createBooking: 'POST /api/bookings',
-      createOrder: 'POST /api/create-razorpay-order',
-      verifyPayment: 'POST /api/verify-payment',
-      bookings: 'GET /api/bookings',
-      health: 'GET /api/health',
-      sendNotifications: 'POST /api/bookings/:id/notify',
-      testNotifications: 'POST /api/bookings/:id/test-notify',
-      notificationStatus: 'GET /api/bookings/:id/notification-status',
-      notificationConfig: 'GET /api/notifications/config',
-      adminBookings: 'GET /api/admin/bookings',
-      adminStats: 'GET /api/admin/stats',
-      adminPipeline: 'GET /api/admin/bookings/pipeline'
+      adminAuth: {
+        login: 'POST /api/admin/auth/login',
+        logout: 'POST /api/admin/auth/logout',
+        verify: 'GET /api/admin/auth/verify',
+        profile: 'GET /api/admin/auth/profile',
+        setup: 'POST /api/admin/setup'
+      },
+      vehicles: {
+        all: 'GET /api/vehicles',
+        available: 'GET /api/vehicles/available',
+        checkAvailability: 'POST /api/vehicles/availability',
+        vehicleAvailability: 'GET /api/vehicles/:id/availability',
+        unavailableDates: 'GET /api/vehicles/:id/unavailable-dates'
+      },
+      bookings: {
+        create: 'POST /api/bookings',
+        getById: 'GET /api/bookings/:id',
+        getAll: 'GET /api/bookings',
+        dateRange: 'GET /api/bookings/date-range',
+        byVehicle: 'GET /api/bookings/vehicle/:vehicleId'
+      },
+      payments: {
+        createOrder: 'POST /api/create-razorpay-order',
+        verify: 'POST /api/verify-payment'
+      },
+      notifications: {
+        send: 'POST /api/bookings/:id/notify',
+        test: 'POST /api/bookings/:id/test-notify',
+        status: 'GET /api/bookings/:id/notification-status',
+        config: 'GET /api/notifications/config',
+        manual: 'POST /api/notifications/send-manual',
+        testSystem: 'POST /api/test-notify'
+      },
+      admin: {
+        bookings: 'GET /api/admin/bookings',
+        stats: 'GET /api/admin/stats',
+        pipeline: 'GET /api/admin/bookings/pipeline',
+        manualBooking: 'POST /api/admin/bookings/manual',
+        updateStatus: 'PUT /api/admin/bookings/:id/status',
+        cancel: 'POST /api/admin/bookings/:id/cancel',
+        handover: 'POST /api/admin/bookings/:id/handover',
+        return: 'POST /api/admin/bookings/:id/return',
+        complete: 'POST /api/admin/bookings/:id/complete',
+        processPayment: 'POST /api/admin/bookings/:id/payment'
+      },
+      system: {
+        health: 'GET /api/health',
+        test: 'GET /api/test',
+        debug: 'GET /api/debug/vehicle/:id',
+        fixQuantity: 'POST /api/admin/fix-vehicle-quantity'
+      }
     }
   });
 });
@@ -212,12 +851,30 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'development',
     notifications: {
       email: process.env.EMAIL_USER ? 'configured' : 'not configured',
-      sms: process.env.TWILIO_ACCOUNT_SID ? 'configured' : 'not configured'
+      sms: process.env.TWILIO_ACCOUNT_SID ? 'configured' : 'not configured',
+      fast2sms: process.env.FAST2SMS_API_KEY ? 'configured' : 'not configured'
+    },
+    server: {
+      port: PORT,
+      nodeVersion: process.version,
+      platform: process.platform
     }
   });
 });
+
+// Test endpoint
+app.get('/api/test', (req, res) => {
+  res.json({ 
+    success: true, 
+    message: 'API is working',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ==================== VEHICLE ROUTES ====================
 
 // Get all vehicles
 app.get('/api/vehicles', async (req, res) => {
@@ -229,9 +886,7 @@ app.get('/api/vehicles', async (req, res) => {
   }
 });
 
-// ==================== AVAILABILITY ENDPOINTS ====================
-
-// Get available vehicles (with optional date filtering)
+// Get available vehicles
 app.get('/api/vehicles/available', async (req, res) => {
   try {
     const { pickupDate, dropoffDate } = req.query;
@@ -362,7 +1017,6 @@ app.post('/api/vehicles/availability', async (req, res) => {
 });
 
 // Check availability for specific vehicle
-// In your server.js, update the availability check endpoint
 app.get('/api/vehicles/:vehicleId/availability', async (req, res) => {
   try {
     const { vehicleId } = req.params;
@@ -389,8 +1043,7 @@ app.get('/api/vehicles/:vehicleId/availability', async (req, res) => {
       message: availability.available ? 
         `✅ ${availability.availableQuantity} of ${availability.vehicleQuantity} vehicles available` : 
         `❌ All ${availability.vehicleQuantity} vehicles are booked`,
-      // Return dateMap for debugging if needed
-      // dateMap: availability.dateMap
+      dateBookings: availability.dateBookings
     });
     
   } catch (error) {
@@ -398,6 +1051,7 @@ app.get('/api/vehicles/:vehicleId/availability', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
 // Get unavailable dates for a vehicle
 app.get('/api/vehicles/:vehicleId/unavailable-dates', async (req, res) => {
   try {
@@ -453,50 +1107,96 @@ app.get('/api/vehicles/:vehicleId/unavailable-dates', async (req, res) => {
   }
 });
 
-// ==================== BOOKING ENDPOINTS ====================
+// Debug vehicle endpoint
+app.get('/api/debug/vehicle/:id', async (req, res) => {
+  try {
+    const vehicle = await Vehicle.findById(req.params.id);
+    
+    if (!vehicle) {
+      return res.status(404).json({ error: 'Vehicle not found' });
+    }
+    
+    // Get all bookings for this vehicle
+    const bookings = await Booking.find({ vehicleId: req.params.id });
+    
+    res.json({
+      vehicle: {
+        id: vehicle._id,
+        name: vehicle.name,
+        quantity: vehicle.quantity,
+        dailyRate: vehicle.dailyRate,
+        isAvailable: vehicle.isAvailable,
+        rawData: vehicle.toObject()
+      },
+      bookings: bookings.map(b => ({
+        id: b._id,
+        bookingId: b.bookingId,
+        customerName: b.customerName,
+        status: b.status,
+        pickupDate: b.pickupDate,
+        dropoffDate: b.dropoffDate,
+        duration: Math.ceil((new Date(b.dropoffDate) - new Date(b.pickupDate)) / (1000 * 60 * 60 * 24)) + ' days'
+      })),
+      totalBookings: bookings.length
+    });
+  } catch (error) {
+    console.error('Debug error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== BOOKING ROUTES ====================
 
 // Create booking
 app.post('/api/bookings', async (req, res) => {
   try {
+    console.log('\n=== NEW BOOKING REQUEST ===');
+    console.log('Request body:', req.body);
+    
     const { vehicleId, pickupDate, dropoffDate, ...bookingData } = req.body;
     
     // Check vehicle exists
     const vehicle = await Vehicle.findById(vehicleId);
     if (!vehicle) {
-      return res.status(404).json({ success: false, error: 'Vehicle not found' });
+      console.log('❌ Vehicle not found:', vehicleId);
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Vehicle not found' 
+      });
     }
     
     // Parse dates
     const startDate = new Date(pickupDate);
     const endDate = new Date(dropoffDate);
     
-    // Validate dates
-    if (startDate >= endDate) {
-      return res.status(400).json({
-        success: false,
-        error: 'Dropoff date must be after pickup date'
-      });
-    }
+    // Set time to midnight
+    startDate.setHours(0, 0, 0, 0);
+    endDate.setHours(0, 0, 0, 0);
     
-    // Check if vehicle is available
-    const availabilityCheck = await checkVehicleAvailability(
-      vehicleId,
-      startDate,
-      endDate
-    );
+    console.log(`Vehicle: ${vehicle.name}`);
+    console.log(`Quantity: ${vehicle.quantity}`);
+    console.log(`Dates: ${startDate.toDateString()} to ${endDate.toDateString()}`);
+    
+    // Check availability
+    const availabilityCheck = await checkVehicleAvailability(vehicleId, startDate, endDate);
     
     if (!availabilityCheck.available) {
+      console.log('❌ Vehicle not available');
       return res.status(400).json({
         success: false,
-        error: `Vehicle is not available for the selected dates. Only ${availabilityCheck.availableQuantity} of ${vehicle.quantity} vehicles available.`,
+        error: `Only ${availabilityCheck.availableQuantity} of ${vehicle.quantity} vehicles available for the selected dates.`,
         availableQuantity: availabilityCheck.availableQuantity,
-        vehicleQuantity: vehicle.quantity
+        vehicleQuantity: vehicle.quantity,
+        bookedQuantity: availabilityCheck.bookedQuantity
       });
     }
     
-    // Calculate total amount
+    // Calculate duration and amount
     const durationDays = Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24));
     const totalAmount = vehicle.dailyRate * durationDays;
+    
+    console.log(`Duration: ${durationDays} days`);
+    console.log(`Total amount: ₹${totalAmount}`);
     
     // Create booking
     const booking = new Booking({
@@ -505,13 +1205,14 @@ app.post('/api/bookings', async (req, res) => {
       vehicleName: vehicle.name,
       pickupDate: startDate,
       dropoffDate: endDate,
-      bookingId: `BOOK${Date.now()}${Math.random().toString(36).substr(2, 9)}`,
+      bookingId: `BOOK${Date.now()}${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`,
       status: 'pending',
       totalAmount: totalAmount,
       durationDays: durationDays,
       vehicleDetails: {
         name: vehicle.name,
         type: vehicle.type,
+        quantity: vehicle.quantity,
         dailyRate: vehicle.dailyRate,
         capacity: vehicle.capacity,
         transmission: vehicle.transmission
@@ -520,9 +1221,9 @@ app.post('/api/bookings', async (req, res) => {
     
     await booking.save();
     
-    // Log for debugging
-    console.log(`Booking created: ${booking.bookingId} for vehicle ${vehicle.name} (Qty: ${vehicle.quantity})`);
-    console.log(`Available quantity at booking time: ${availabilityCheck.availableQuantity}`);
+    console.log(`✅ Booking created: ${booking.bookingId}`);
+    console.log(`Customer: ${booking.customerName}`);
+    console.log('=== BOOKING CREATION COMPLETE ===\n');
     
     res.json({
       success: true,
@@ -532,654 +1233,107 @@ app.post('/api/bookings', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Error creating booking:', error);
+    console.error('❌ Error creating booking:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// Get booking by ID
+app.get('/api/bookings/:id', async (req, res) => {
+  try {
+    const booking = await Booking.findOne({ bookingId: req.params.id });
+    if (!booking) {
+      return res.status(404).json({ success: false, error: 'Booking not found' });
+    }
+    res.json({ success: true, data: booking });
+  } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// notificationService.cjs - UPDATED WITH FAST2SMS
-const nodemailer = require('nodemailer');
-const axios = require('axios');
-
-console.log('📧📱 Notification Service (CJS) Loading...');
-
-// Email configuration
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER || 'test@gmail.com',
-    pass: process.env.EMAIL_PASSWORD || 'test'
+// Get all bookings
+app.get('/api/bookings', async (req, res) => {
+  try {
+    const bookings = await Booking.find().sort({ createdAt: -1 });
+    res.json({ success: true, data: bookings });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Company details
-const COMPANY_NAME = process.env.COMPANY_NAME || 'MJ Car Rentals';
-const COMPANY_PHONE = process.env.COMPANY_PHONE || '1234567890';
-const ADMIN_PHONE = process.env.ADMIN_PHONE || '';
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || '';
-
-console.log('📧 Email configured for:', process.env.EMAIL_USER || 'Not configured');
-console.log('📱 SMS configured:', process.env.FAST2SMS_API_KEY ? 'Yes (Fast2SMS)' : 'No');
-
-class NotificationService {
-  constructor() {
-    console.log('📧📱 NotificationService instance created');
-  }
-
-  /**
-   * Send SMS via Fast2SMS
-   */
-  async sendFast2SMS(phoneNumber, message) {
-    try {
-      const apiKey = process.env.FAST2SMS_API_KEY;
-      if (!apiKey) {
-        console.log('⚠️ Fast2SMS API key not configured');
-        return { success: false, error: 'Fast2SMS API key not configured' };
-      }
-
-      // Format phone number
-      let phone = phoneNumber.toString().trim();
-      
-      // Remove any non-digit characters
-      phone = phone.replace(/\D/g, '');
-      
-      // Remove leading 0 if present
-      if (phone.startsWith('0')) {
-        phone = phone.substring(1);
-      }
-      
-      // Ensure it's 10 digits
-      if (phone.length !== 10) {
-        console.log('⚠️ Invalid phone number length:', phone);
-        return { success: false, error: 'Invalid phone number length. Must be 10 digits.' };
-      }
-      
-      // Fast2SMS requires 10-digit Indian numbers
-      // Format: 91XXXXXXXXXX (12 digits)
-      const formattedPhone = `91${phone}`;
-      
-      console.log('📱 Sending SMS via Fast2SMS to:', phone);
-      console.log('Message:', message.substring(0, 50) + '...');
-      
-      const response = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
-        sender_id: process.env.FAST2SMS_SENDER_ID || 'FSTSMS',
-        message: message,
-        language: "english",
-        route: "q", // q for promotional, t for transactional
-        numbers: formattedPhone
-      }, {
-        headers: {
-          'authorization': apiKey,
-          'Content-Type': 'application/json'
-        }
-      });
-
-      console.log('✅ Fast2SMS response:', response.data);
-      
-      if (response.data.return === true) {
-        return {
-          success: true,
-          service: 'fast2sms',
-          requestId: response.data.request_id,
-          messageId: response.data.message_id || response.data.request_id
-        };
-      } else {
-        return {
-          success: false,
-          service: 'fast2sms',
-          error: response.data.message || 'Unknown error'
-        };
-      }
-      
-    } catch (error) {
-      console.error('❌ Fast2SMS Error:', error.response?.data || error.message);
-      return {
-        success: false,
-        service: 'fast2sms',
-        error: error.response?.data?.message || error.message
-      };
-    }
-  }
-
-  /**
-   * Send SMS to customer
-   */
-  async sendSMSToCustomer(customerPhone, bookingDetails) {
-    try {
-      if (!customerPhone) {
-        console.log('⚠️ Customer phone not provided');
-        return { success: false, error: 'Customer phone not provided' };
-      }
-
-      // Format dates
-      const pickupDate = new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN', {
-        day: 'numeric',
-        month: 'short',
-        year: 'numeric'
-      });
-      
-      const returnDate = new Date(bookingDetails.returnDate).toLocaleDateString('en-IN', {
-        day: 'numeric',
-        month: 'short',
-        year: 'numeric'
-      });
-
-      const message = `
-🎉 Booking Confirmed!
-Booking ID: ${bookingDetails.bookingId}
-Vehicle: ${bookingDetails.vehicleName}
-Dates: ${pickupDate} to ${returnDate}
-Amount: ₹${bookingDetails.totalAmount}
-Booking Fee: ₹${bookingDetails.bookingFee || 200} paid
-Balance: ₹${bookingDetails.totalAmount - (bookingDetails.bookingFee || 200)} at pickup
-
-Thank you for choosing ${COMPANY_NAME}! Call ${COMPANY_PHONE} for queries.
-      `.trim();
-
-      return await this.sendFast2SMS(customerPhone, message);
-      
-    } catch (error) {
-      console.error('❌ SMS to customer failed:', error.message);
-      return { success: false, error: error.message };
-    }
-  }
-
-  /**
-   * Send SMS to admin
-   */
-  async sendSMSToAdmin(bookingDetails) {
-    try {
-      if (!ADMIN_PHONE) {
-        console.log('⚠️ ADMIN_PHONE not configured');
-        return { success: false, error: 'ADMIN_PHONE not configured' };
-      }
-
-      const message = `
-🚨 NEW BOOKING!
-ID: ${bookingDetails.bookingId}
-Customer: ${bookingDetails.customerName}
-Phone: ${bookingDetails.customerPhone}
-Vehicle: ${bookingDetails.vehicleName}
-Amount: ₹${bookingDetails.totalAmount}
-Pickup: ${new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN')}
-      `.trim();
-
-      return await this.sendFast2SMS(ADMIN_PHONE, message);
-      
-    } catch (error) {
-      console.error('❌ SMS to admin failed:', error.message);
-      return { success: false, error: error.message };
-    }
-  }
-
-  /**
-   * Send email to customer
-   */
-  async sendBookingEmailToCustomer(customerEmail, bookingDetails) {
-    try {
-      console.log('📧 Sending email to customer:', customerEmail);
-      
-      if (!customerEmail || !customerEmail.includes('@')) {
-        console.log('⚠️ Invalid customer email:', customerEmail);
-        return { success: false, error: 'Invalid email address' };
-      }
-
-      const mailOptions = {
-        from: `"${COMPANY_NAME}" <${process.env.EMAIL_USER}>`,
-        to: customerEmail,
-        subject: `🎉 Booking Confirmation - ${bookingDetails.vehicleName}`,
-        html: this.generateCustomerEmail(bookingDetails),
-        text: this.generateCustomerEmailText(bookingDetails)
-      };
-
-      const info = await transporter.sendMail(mailOptions);
-      console.log('✅ Email sent to customer:', info.messageId);
-      return { success: true, messageId: info.messageId };
-    } catch (error) {
-      console.error('❌ Email to customer failed:', error.message);
-      return { success: false, error: error.message };
-    }
-  }
-
-  /**
-   * Send email to admin
-   */
-  async sendBookingEmailToAdmin(bookingDetails) {
-    try {
-      if (!ADMIN_EMAIL) {
-        console.log('⚠️ Admin email not configured');
-        return { success: false, error: 'Admin email not configured' };
-      }
-
-      console.log('📧 Sending email to admin:', ADMIN_EMAIL);
-      
-      const mailOptions = {
-        from: `"${COMPANY_NAME}" <${process.env.EMAIL_USER}>`,
-        to: ADMIN_EMAIL,
-        subject: `📋 NEW BOOKING - ${bookingDetails.bookingId}`,
-        html: this.generateAdminEmail(bookingDetails),
-        text: this.generateAdminEmailText(bookingDetails)
-      };
-
-      const info = await transporter.sendMail(mailOptions);
-      console.log('✅ Email sent to admin:', info.messageId);
-      return { success: true, messageId: info.messageId };
-    } catch (error) {
-      console.error('❌ Email to admin failed:', error.message);
-      return { success: false, error: error.message };
-    }
-  }
-
-  /**
-   * Generate customer email HTML
-   */
-  generateCustomerEmail(bookingDetails) {
-    const pickupDate = new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    });
-    
-    const returnDate = new Date(bookingDetails.returnDate).toLocaleDateString('en-IN', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    });
-
-    return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Booking Confirmation - ${COMPANY_NAME}</title>
-</head>
-<body>
-  <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto;">
-    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
-      <h1>🎉 Booking Confirmed!</h1>
-      <p>Dear ${bookingDetails.customerName},</p>
-    </div>
-    
-    <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
-      <p>Your booking has been successfully confirmed! Here are your booking details:</p>
-      
-      <div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-        <h2>📋 Booking Summary</h2>
-        <p><strong>Booking ID:</strong> ${bookingDetails.bookingId}</p>
-        <p><strong>Vehicle:</strong> ${bookingDetails.vehicleName}</p>
-        <p><strong>Pickup Date:</strong> ${pickupDate}</p>
-        <p><strong>Return Date:</strong> ${returnDate}</p>
-        <p><strong>Duration:</strong> ${bookingDetails.totalDays || '1'} day(s)</p>
-        
-        <h3>💰 Payment Summary</h3>
-        <p><strong>Total Rental Amount:</strong> ₹${bookingDetails.totalAmount}</p>
-        <p><strong>Booking Fee Paid:</strong> ₹${bookingDetails.bookingFee || 200}</p>
-        <p><strong>Balance to Pay at Pickup:</strong> ₹${bookingDetails.totalAmount - (bookingDetails.bookingFee || 200)}</p>
-      </div>
-      
-      <p><strong>📱 Important Notes:</strong></p>
-      <ul>
-        <li>Please bring your original driving license and ID proof (Aadhar/Passport)</li>
-        <li>Pay the remaining balance at vehicle pickup</li>
-        <li>For any changes, contact us at least 24 hours before pickup</li>
-      </ul>
-      
-      <p><strong>📞 Contact Information:</strong></p>
-      <p>${COMPANY_NAME}<br>
-      Phone: ${COMPANY_PHONE}<br>
-      Email: ${process.env.EMAIL_USER}</p>
-      
-      <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; color: #666;">
-        <p>Thank you for choosing ${COMPANY_NAME}!</p>
-        <p>Safe travels! 🚗💨</p>
-      </div>
-    </div>
-  </div>
-</body>
-</html>
-    `;
-  }
-
-  /**
-   * Generate customer email text version
-   */
-  generateCustomerEmailText(bookingDetails) {
-    return `
-Booking Confirmation - ${COMPANY_NAME}
-
-Dear ${bookingDetails.customerName},
-
-Your booking has been successfully confirmed!
-
-📋 Booking Details:
-Booking ID: ${bookingDetails.bookingId}
-Vehicle: ${bookingDetails.vehicleName}
-Pickup Date: ${new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN')}
-Return Date: ${new Date(bookingDetails.returnDate).toLocaleDateString('en-IN')}
-Duration: ${bookingDetails.totalDays || '1'} day(s)
-
-💰 Payment Summary:
-Total Rental Amount: ₹${bookingDetails.totalAmount}
-Booking Fee Paid: ₹${bookingDetails.bookingFee || 200}
-Balance to Pay at Pickup: ₹${bookingDetails.totalAmount - (bookingDetails.bookingFee || 200)}
-
-📱 Important Notes:
-• Please bring your original driving license and ID proof (Aadhar/Passport)
-• Pay the remaining balance at vehicle pickup
-• For any changes, contact us at least 24 hours before pickup
-
-📞 Contact Information:
-${COMPANY_NAME}
-Phone: ${COMPANY_PHONE}
-Email: ${process.env.EMAIL_USER}
-
-Thank you for choosing ${COMPANY_NAME}!
-Safe travels! 🚗💨
-    `;
-  }
-
-  /**
-   * Generate admin email HTML
-   */
-  generateAdminEmail(bookingDetails) {
-    return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NEW BOOKING - ${COMPANY_NAME}</title>
-</head>
-<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-  <h1>🚨 NEW BOOKING ALERT</h1>
-  
-  <div style="background: #fff3cd; border: 1px solid #ffeaa7; padding: 20px; border-radius: 8px; margin: 20px 0;">
-    <h2>IMMEDIATE ACTION REQUIRED</h2>
-    <p>A new booking has been received and requires processing!</p>
-  </div>
-  
-  <div style="background: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px; margin: 10px 0;">
-    <strong>⚠️ ACTION ITEMS:</strong>
-    <ol>
-      <li>Contact customer to confirm pickup time</li>
-      <li>Prepare vehicle for handover</li>
-      <li>Update booking status in system</li>
-    </ol>
-  </div>
-  
-  <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
-    <h2>📋 Booking Details</h2>
-    <p><strong>Booking ID:</strong> ${bookingDetails.bookingId}</p>
-    <p><strong>Customer Name:</strong> ${bookingDetails.customerName}</p>
-    <p><strong>Customer Phone:</strong> ${bookingDetails.customerPhone}</p>
-    <p><strong>Customer Email:</strong> ${bookingDetails.customerEmail}</p>
-    <p><strong>Vehicle:</strong> ${bookingDetails.vehicleName}</p>
-    <p><strong>Total Amount:</strong> ₹${bookingDetails.totalAmount}</p>
-    <p><strong>Booking Fee Paid:</strong> ₹${bookingDetails.bookingFee || 200}</p>
-    <p><strong>Pickup Date:</strong> ${new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN')}</p>
-    <p><strong>Return Date:</strong> ${new Date(bookingDetails.returnDate).toLocaleDateString('en-IN')}</p>
-    <p><strong>Booked at:</strong> ${new Date(bookingDetails.createdAt).toLocaleString('en-IN')}</p>
-  </div>
-  
-  <p><strong>Quick Actions:</strong></p>
-  <ul>
-    <li><a href="tel:${bookingDetails.customerPhone}">📞 Call Customer</a></li>
-    <li><a href="mailto:${bookingDetails.customerEmail}">✉️ Email Customer</a></li>
-  </ul>
-</body>
-</html>
-    `;
-  }
-
-  /**
-   * Generate admin email text version
-   */
-  generateAdminEmailText(bookingDetails) {
-    return `
-NEW BOOKING ALERT - ${COMPANY_NAME}
-
-🚨 IMMEDIATE ACTION REQUIRED
-A new booking has been received and requires processing!
-
-⚠️ ACTION ITEMS:
-1. Contact customer to confirm pickup time
-2. Prepare vehicle for handover
-3. Update booking status in system
-
-📋 Booking Details:
-Booking ID: ${bookingDetails.bookingId}
-Customer: ${bookingDetails.customerName}
-Phone: ${bookingDetails.customerPhone}
-Email: ${bookingDetails.customerEmail}
-Vehicle: ${bookingDetails.vehicleName}
-Amount: ₹${bookingDetails.totalAmount}
-Booking Fee: ₹${bookingDetails.bookingFee || 200}
-Pickup: ${new Date(bookingDetails.pickupDate).toLocaleDateString('en-IN')}
-Return: ${new Date(bookingDetails.returnDate).toLocaleDateString('en-IN')}
-Booked at: ${new Date(bookingDetails.createdAt).toLocaleString('en-IN')}
-
-Quick Actions:
-• Call customer: ${bookingDetails.customerPhone}
-• Email customer: ${bookingDetails.customerEmail}
-    `;
-  }
-
-  /**
-   * Send all notifications (Email + SMS to customer and admin)
-   */
-  async sendAllNotifications(bookingDetails) {
-    console.log('📧📱 sendAllNotifications called for:', bookingDetails.bookingId);
-    
-    const results = {
-      customerEmail: { success: false },
-      customerSMS: { success: false },
-      adminEmail: { success: false },
-      adminSMS: { success: false }
-    };
-
-    try {
-      // 1. Send email to customer
-      if (bookingDetails.customerEmail) {
-        results.customerEmail = await this.sendBookingEmailToCustomer(
-          bookingDetails.customerEmail, 
-          bookingDetails
-        );
-      } else {
-        results.customerEmail.error = 'No customer email provided';
-      }
-
-      // 2. Send SMS to customer
-      if (bookingDetails.customerPhone) {
-        results.customerSMS = await this.sendSMSToCustomer(
-          bookingDetails.customerPhone,
-          bookingDetails
-        );
-      } else {
-        results.customerSMS.error = 'No customer phone provided';
-      }
-
-      // 3. Send email to admin
-      if (ADMIN_EMAIL) {
-        results.adminEmail = await this.sendBookingEmailToAdmin(bookingDetails);
-      } else {
-        results.adminEmail.error = 'ADMIN_EMAIL not configured';
-      }
-
-      // 4. Send SMS to admin
-      if (ADMIN_PHONE) {
-        results.adminSMS = await this.sendSMSToAdmin(bookingDetails);
-      } else {
-        results.adminSMS.error = 'ADMIN_PHONE not configured';
-      }
-
-      // Count successes
-      const successful = Object.values(results).filter(r => r.success).length;
-      const totalAttempted = Object.keys(results).length;
-      
-      console.log(`📊 Notification Summary: ${successful}/${totalAttempted} successful`);
-      console.log('Results:', JSON.stringify(results, null, 2));
-
-      return {
-        success: successful > 0,
-        results: results,
-        summary: {
-          totalAttempted: totalAttempted,
-          successful: successful,
-          failed: totalAttempted - successful
-        }
-      };
-
-    } catch (error) {
-      console.error('🔥 Error in sendAllNotifications:', error);
-      return {
-        success: false,
-        error: error.message,
-        results: results
-      };
-    }
-  }
-
-  /**
-   * Test SMS service
-   */
-  async testSMS(phoneNumber, message = 'Test SMS from MJ Car Rentals') {
-    console.log('🧪 Testing SMS service...');
-    return await this.sendFast2SMS(phoneNumber, message);
-  }
-}
-
-// Export instance
-module.exports = new NotificationService();
-// Separate function to check vehicle availability
-async function checkVehicleAvailability(vehicleId, startDate, endDate, excludeBookingId = null) {
+// Get bookings by date range (admin view)
+app.get('/api/bookings/date-range', async (req, res) => {
   try {
-    console.log('=== AVAILABILITY CHECK START ===');
-    console.log('Vehicle ID:', vehicleId);
-    console.log('Start Date:', startDate.toISOString());
-    console.log('End Date:', endDate.toISOString());
+    const { startDate, endDate } = req.query;
     
-    // Find vehicle with explicit field selection
-    const vehicle = await Vehicle.findById(vehicleId).select('name quantity');
-    
-    if (!vehicle) {
-      console.log('❌ Vehicle not found');
-      return { available: false, availableQuantity: 0, vehicleQuantity: 0 };
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        error: 'Start and end dates are required'
+      });
     }
     
-    // Debug: Log the vehicle object
-    console.log('Vehicle object:', vehicle);
-    console.log('Vehicle JSON:', JSON.stringify(vehicle, null, 2));
-    console.log(`Vehicle: ${vehicle.name}, Quantity: ${vehicle.quantity}`);
+    const start = new Date(startDate);
+    const end = new Date(endDate);
     
-    // Make sure quantity is a number
-    const quantity = Number(vehicle.quantity) || 1;
-    console.log(`Parsed quantity: ${quantity} (Type: ${typeof quantity})`);
-    
-    // Build query for overlapping bookings
-    const query = {
-      vehicleId: vehicleId,
-      status: { $in: ['confirmed', 'pending', 'handed_over', 'in_use', 'overdue'] }
-    };
-    
-    // Date overlap condition - Simplified
-    query.$or = [
-      {
-        pickupDate: { $lte: endDate },
-        dropoffDate: { $gte: startDate }
-      }
-    ];
-    
-    if (excludeBookingId) {
-      query._id = { $ne: excludeBookingId };
-    }
-    
-    console.log('Query:', JSON.stringify(query, null, 2));
-    
-    const overlappingBookings = await Booking.find(query);
-    console.log(`Found ${overlappingBookings.length} overlapping bookings`);
-    
-    // If no overlapping bookings, all vehicles are available
-    if (overlappingBookings.length === 0) {
-      console.log(`✅ No overlapping bookings. All ${quantity} vehicles available.`);
-      console.log('=== AVAILABILITY CHECK END ===');
-      return {
-        available: true,
-        availableQuantity: quantity,
-        vehicleQuantity: quantity,
-        bookedQuantity: 0
-      };
-    }
-    
-    // Calculate day-by-day bookings
-    const dateBookings = {};
-    
-    // Initialize all dates in range
-    const currentDate = new Date(startDate);
-    while (currentDate <= endDate) {
-      const dateStr = currentDate.toISOString().split('T')[0];
-      dateBookings[dateStr] = 0;
-      currentDate.setDate(currentDate.getDate() + 1);
-    }
-    
-    console.log('Date range initialized:', Object.keys(dateBookings).length, 'days');
-    
-    // Count bookings for each day
-    overlappingBookings.forEach((booking, index) => {
-      console.log(`\nBooking ${index + 1}:`);
-      console.log(`- Booking ID: ${booking.bookingId}`);
-      console.log(`- Status: ${booking.status}`);
-      console.log(`- Pickup: ${booking.pickupDate}`);
-      console.log(`- Dropoff: ${booking.dropoffDate}`);
-      
-      const bookingStart = new Date(booking.pickupDate);
-      const bookingEnd = new Date(booking.dropoffDate);
-      
-      // Reset hours to avoid timezone issues
-      bookingStart.setHours(0, 0, 0, 0);
-      bookingEnd.setHours(0, 0, 0, 0);
-      
-      let current = new Date(bookingStart);
-      while (current <= bookingEnd) {
-        const dateStr = current.toISOString().split('T')[0];
-        if (dateBookings[dateStr] !== undefined) {
-          dateBookings[dateStr]++;
+    const bookings = await Booking.find({
+      $or: [
+        { pickupDate: { $gte: start, $lte: end } },
+        { dropoffDate: { $gte: start, $lte: end } },
+        {
+          pickupDate: { $lte: start },
+          dropoffDate: { $gte: end }
         }
-        current.setDate(current.getDate() + 1);
-      }
+      ]
+    }).sort({ pickupDate: 1 });
+    
+    res.json({
+      success: true,
+      startDate,
+      endDate,
+      totalBookings: bookings.length,
+      bookings: bookings
     });
-    
-    console.log('\nDate-wise bookings:', dateBookings);
-    
-    // Find maximum concurrent bookings on any day
-    const bookingCounts = Object.values(dateBookings);
-    const maxConcurrentBookings = bookingCounts.length > 0 ? Math.max(...bookingCounts) : 0;
-    const availableQuantity = quantity - maxConcurrentBookings;
-    
-    console.log(`\nSummary:`);
-    console.log(`- Vehicle quantity: ${quantity}`);
-    console.log(`- Max concurrent bookings: ${maxConcurrentBookings}`);
-    console.log(`- Available quantity: ${availableQuantity}`);
-    console.log(`- Is available: ${availableQuantity > 0}`);
-    
-    console.log('=== AVAILABILITY CHECK END ===');
-    
-    return {
-      available: availableQuantity > 0,
-      availableQuantity: Math.max(0, availableQuantity),
-      vehicleQuantity: quantity,
-      bookedQuantity: maxConcurrentBookings,
-      dateBookings: dateBookings,
-      overlappingBookingsCount: overlappingBookings.length
-    };
     
   } catch (error) {
-    console.error('❌ Error in checkVehicleAvailability:', error);
-    throw error;
+    console.error('Error getting bookings by date range:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
-}
+});
+
+// Get bookings for a specific vehicle
+app.get('/api/bookings/vehicle/:vehicleId', async (req, res) => {
+  try {
+    const { vehicleId } = req.params;
+    
+    const bookings = await Booking.find({
+      vehicleId: vehicleId,
+      status: { $in: ['confirmed', 'handed_over', 'in_use', 'completed'] }
+    }).sort({ pickupDate: 1 });
+    
+    res.json({
+      success: true,
+      vehicleId,
+      totalBookings: bookings.length,
+      bookings: bookings
+    });
+    
+  } catch (error) {
+    console.error('Error getting vehicle bookings:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// ==================== PAYMENT ROUTES ====================
 
 // CREATE RAZORPAY ORDER ENDPOINT
 app.post('/api/create-razorpay-order', async (req, res) => {
@@ -1208,7 +1362,7 @@ app.post('/api/create-razorpay-order', async (req, res) => {
     
     // Create REAL Razorpay order
     const options = {
-      amount: amount , // ₹10 in paise
+      amount: amount * 100, // Convert to paise
       currency: 'INR',
       receipt: `receipt_${bookingId}`,
       notes: {
@@ -1316,6 +1470,10 @@ app.post('/api/verify-payment', async (req, res) => {
       booking.paymentTimestamp = new Date();
       
       // Add to status history
+      if (!booking.statusHistory) {
+        booking.statusHistory = [];
+      }
+      
       booking.statusHistory.push({
         status: 'confirmed',
         timestamp: new Date(),
@@ -1393,223 +1551,9 @@ app.post('/api/verify-payment', async (req, res) => {
   }
 });
 
-// Get all bookings
-app.post('/api/bookings', async (req, res) => {
-  try {
-    console.log('\n=== NEW BOOKING REQUEST ===');
-    console.log('Request body:', req.body);
-    
-    const { vehicleId, pickupDate, dropoffDate, ...bookingData } = req.body;
-    
-    // Check vehicle exists
-    const vehicle = await Vehicle.findById(vehicleId);
-    if (!vehicle) {
-      console.log('❌ Vehicle not found:', vehicleId);
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Vehicle not found' 
-      });
-    }
-    
-    // Parse dates
-    const startDate = new Date(pickupDate);
-    const endDate = new Date(dropoffDate);
-    
-    // Set time to midnight
-    startDate.setHours(0, 0, 0, 0);
-    endDate.setHours(0, 0, 0, 0);
-    
-    console.log(`Vehicle: ${vehicle.name}`);
-    console.log(`Quantity: ${vehicle.quantity}`);
-    console.log(`Dates: ${startDate.toDateString()} to ${endDate.toDateString()}`);
-    
-    // Check availability
-    const availabilityCheck = await checkVehicleAvailability(vehicleId, startDate, endDate);
-    
-    if (!availabilityCheck.available) {
-      console.log('❌ Vehicle not available');
-      return res.status(400).json({
-        success: false,
-        error: `Only ${availabilityCheck.availableQuantity} of ${vehicle.quantity} vehicles available for the selected dates.`,
-        availableQuantity: availabilityCheck.availableQuantity,
-        vehicleQuantity: vehicle.quantity,
-        bookedQuantity: availabilityCheck.bookedQuantity
-      });
-    }
-    
-    // Calculate duration and amount
-    const durationDays = Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24));
-    const totalAmount = vehicle.dailyRate * durationDays;
-    
-    console.log(`Duration: ${durationDays} days`);
-    console.log(`Total amount: ₹${totalAmount}`);
-    
-    // Create booking
-    const booking = new Booking({
-      ...bookingData,
-      vehicleId,
-      vehicleName: vehicle.name,
-      pickupDate: startDate,
-      dropoffDate: endDate,
-      bookingId: `BOOK${Date.now()}${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`,
-      status: 'pending',
-      totalAmount: totalAmount,
-      durationDays: durationDays,
-      vehicleDetails: {
-        name: vehicle.name,
-        type: vehicle.type,
-        quantity: vehicle.quantity,
-        dailyRate: vehicle.dailyRate,
-        capacity: vehicle.capacity,
-        transmission: vehicle.transmission
-      }
-    });
-    
-    await booking.save();
-    
-    console.log(`✅ Booking created: ${booking.bookingId}`);
-    console.log(`Customer: ${booking.customerName}`);
-    console.log('=== BOOKING CREATION COMPLETE ===\n');
-    
-    res.json({
-      success: true,
-      message: 'Booking created successfully',
-      bookingId: booking.bookingId,
-      booking: booking
-    });
-    
-  } catch (error) {
-    console.error('❌ Error creating booking:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
-  }
-});
-// Get booking by ID
-app.get('/api/bookings/:id', async (req, res) => {
-  try {
-    const booking = await Booking.findOne({ bookingId: req.params.id });
-    if (!booking) {
-      return res.status(404).json({ success: false, error: 'Booking not found' });
-    }
-    res.json({ success: true, data: booking });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.get('/api/debug/vehicle/:id', async (req, res) => {
-  try {
-    const vehicle = await Vehicle.findById(req.params.id);
-    
-    if (!vehicle) {
-      return res.status(404).json({ error: 'Vehicle not found' });
-    }
-    
-    // Get all bookings for this vehicle
-    const bookings = await Booking.find({ vehicleId: req.params.id });
-    
-    res.json({
-      vehicle: {
-        id: vehicle._id,
-        name: vehicle.name,
-        quantity: vehicle.quantity,
-        isAvailable: vehicle.isAvailable,
-        rawData: vehicle.toObject()
-      },
-      bookings: bookings.map(b => ({
-        id: b._id,
-        bookingId: b.bookingId,
-        customerName: b.customerName,
-        status: b.status,
-        pickupDate: b.pickupDate,
-        dropoffDate: b.dropoffDate,
-        duration: Math.ceil((new Date(b.dropoffDate) - new Date(b.pickupDate)) / (1000 * 60 * 60 * 24)) + ' days'
-      })),
-      totalBookings: bookings.length
-    });
-  } catch (error) {
-    console.error('Debug error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-
-// Get bookings by date range (admin view)
-app.get('/api/bookings/date-range', async (req, res) => {
-  try {
-    const { startDate, endDate } = req.query;
-    
-    if (!startDate || !endDate) {
-      return res.status(400).json({
-        success: false,
-        error: 'Start and end dates are required'
-      });
-    }
-    
-    const start = new Date(startDate);
-    const end = new Date(endDate);
-    
-    const bookings = await Booking.find({
-      $or: [
-        { pickupDate: { $gte: start, $lte: end } },
-        { dropoffDate: { $gte: start, $lte: end } },
-        {
-          pickupDate: { $lte: start },
-          dropoffDate: { $gte: end }
-        }
-      ]
-    }).sort({ pickupDate: 1 });
-    
-    res.json({
-      success: true,
-      startDate,
-      endDate,
-      totalBookings: bookings.length,
-      bookings: bookings
-    });
-    
-  } catch (error) {
-    console.error('Error getting bookings by date range:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Get bookings for a specific vehicle
-app.get('/api/bookings/vehicle/:vehicleId', async (req, res) => {
-  try {
-    const { vehicleId } = req.params;
-    
-    const bookings = await Booking.find({
-      vehicleId: vehicleId,
-      status: { $in: ['confirmed', 'handed_over', 'in_use', 'completed'] }
-    }).sort({ pickupDate: 1 });
-    
-    res.json({
-      success: true,
-      vehicleId,
-      totalBookings: bookings.length,
-      bookings: bookings
-    });
-    
-  } catch (error) {
-    console.error('Error getting vehicle bookings:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
 // ==================== NOTIFICATION ROUTES ====================
 
-/**
- * Send notifications for a booking
- */
+// Send notifications for a booking
 app.post('/api/bookings/:id/notify', async (req, res) => {
   try {
     const bookingId = req.params.id;
@@ -1672,9 +1616,7 @@ app.post('/api/bookings/:id/notify', async (req, res) => {
   }
 });
 
-/**
- * Update booking payment status
- */
+// Update booking payment status
 app.put('/api/bookings/:id/payment', async (req, res) => {
   try {
     const { paymentId, paymentStatus, amount, ...otherData } = req.body;
@@ -1714,9 +1656,7 @@ app.put('/api/bookings/:id/payment', async (req, res) => {
   }
 });
 
-/**
- * Confirm payment and send notifications (all-in-one)
- */
+// Confirm payment and send notifications (all-in-one)
 app.post('/api/bookings/:id/confirm-payment', async (req, res) => {
   try {
     const bookingId = req.params.id;
@@ -1808,9 +1748,7 @@ app.post('/api/bookings/:id/confirm-payment', async (req, res) => {
   }
 });
 
-/**
- * Test notification endpoint
- */
+// Test notification endpoint
 app.post('/api/bookings/:id/test-notify', async (req, res) => {
   try {
     const bookingId = req.params.id;
@@ -1884,102 +1822,42 @@ app.post('/api/bookings/:id/test-notify', async (req, res) => {
     });
   }
 });
-app.get('/api/admin/stats', async (req, res) => {
+
+// Test notification system endpoint
+app.post('/api/test-notify', async (req, res) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    console.log('🧪 Testing notification system...');
     
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const testBooking = {
+      bookingId: 'TEST' + Date.now(),
+      customerName: 'Test Customer',
+      customerEmail: 'test@example.com',  // Change to your email for testing
+      customerPhone: '9876543210',        // Change to your phone for testing
+      vehicleName: 'Toyota Innova',
+      pickupDate: new Date(),
+      returnDate: new Date(Date.now() + 86400000),
+      totalAmount: 2010,
+      bookingFee: 10,
+      totalDays: 1,
+      createdAt: new Date()
+    };
     
-    const weekAgo = new Date(today);
-    weekAgo.setDate(weekAgo.getDate() - 7);
-    
-    const monthAgo = new Date(today);
-    monthAgo.setDate(monthAgo.getDate() - 30);
-    
-    // Get counts by status
-    const statusCounts = await Booking.aggregate([
-      {
-        $group: {
-          _id: '$status',
-          count: { $sum: 1 }
-        }
-      }
-    ]);
-    
-    // Get today's pickups
-    const todaysPickups = await Booking.countDocuments({
-      pickupDate: { $gte: today, $lt: tomorrow },
-      status: { $in: ['confirmed', 'handed_over'] }
-    });
-    
-    // Get today's dropoffs
-    const todaysDropoffs = await Booking.countDocuments({
-      dropoffDate: { $gte: today, $lt: tomorrow },
-      status: { $in: ['handed_over', 'in_use'] }
-    });
-    
-    // Get revenue stats
-    const revenueStats = await Booking.aggregate([
-      {
-        $match: {
-          paymentStatus: 'paid',
-          createdAt: { $gte: monthAgo }
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalRevenue: { $sum: '$totalAmount' },
-          avgRevenue: { $avg: '$totalAmount' },
-          count: { $sum: 1 }
-        }
-      }
-    ]);
-    
-    // Get recent bookings
-    const recentBookings = await Booking.find()
-      .sort({ createdAt: -1 })
-      .limit(5);
-    
-    // Convert status counts to object
-    const statusMap = {};
-    statusCounts.forEach(item => {
-      statusMap[item._id] = item.count;
-    });
+    const result = await notificationService.sendAllNotifications(testBooking);
     
     res.json({
       success: true,
-      stats: {
-        totalBookings: await Booking.countDocuments(),
-        statusCounts: statusMap,
-        todaysPickups,
-        todaysDropoffs,
-        totalRevenue: revenueStats[0]?.totalRevenue || 0,
-        avgBookingValue: revenueStats[0]?.avgRevenue || 0,
-        recentBookings: recentBookings.map(b => ({
-          bookingId: b.bookingId,
-          customerName: b.customerName,
-          vehicleName: b.vehicleName,
-          status: b.status,
-          totalAmount: b.totalAmount,
-          createdAt: b.createdAt
-        }))
-      }
+      message: 'Test completed',
+      result: result,
+      testData: testBooking
     });
     
   } catch (error) {
-    console.error('Error fetching admin stats:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    console.error('Test error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
-/**
- * Get notification status
- */
+
+// Get notification status
 app.get('/api/bookings/:id/notification-status', async (req, res) => {
   try {
     const bookingId = req.params.id;
@@ -2017,9 +1895,7 @@ app.get('/api/bookings/:id/notification-status', async (req, res) => {
   }
 });
 
-/**
- * Manual notification trigger endpoint
- */
+// Manual notification trigger endpoint
 app.post('/api/notifications/send-manual', async (req, res) => {
   try {
     const { bookingId, customerEmail, customerPhone, customerName, vehicleName, totalAmount } = req.body;
@@ -2099,9 +1975,7 @@ app.post('/api/notifications/send-manual', async (req, res) => {
   }
 });
 
-/**
- * Check system notification configuration
- */
+// Check system notification configuration
 app.get('/api/notifications/config', async (req, res) => {
   try {
     const config = {
@@ -2114,6 +1988,10 @@ app.get('/api/notifications/config', async (req, res) => {
         configured: !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
         accountSid: process.env.TWILIO_ACCOUNT_SID ? 'Configured' : 'Not configured',
         phoneNumber: process.env.TWILIO_PHONE_NUMBER || 'Not configured'
+      },
+      fast2sms: {
+        configured: !!process.env.FAST2SMS_API_KEY,
+        apiKey: process.env.FAST2SMS_API_KEY ? 'Configured' : 'Not configured'
       },
       admin: {
         email: process.env.ADMIN_EMAIL || 'Not configured',
@@ -2133,6 +2011,7 @@ app.get('/api/notifications/config', async (req, res) => {
       instructions: {
         email: 'Set EMAIL_USER and EMAIL_PASSWORD in .env file',
         sms: 'Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER in .env',
+        fast2sms: 'Set FAST2SMS_API_KEY in .env for Indian SMS',
         admin: 'Set ADMIN_EMAIL and ADMIN_PHONE for admin notifications'
       }
     });
@@ -2147,25 +2026,10 @@ app.get('/api/notifications/config', async (req, res) => {
   }
 });
 
-// ==================== ADMIN ENDPOINTS - UPDATED ====================
+// ==================== ADMIN MANAGEMENT ROUTES ====================
 
-// Helper function to find booking by either bookingId or _id
-const findBooking = async (identifier) => {
-  // First try to find by bookingId
-  let booking = await Booking.findOne({ bookingId: identifier });
-  
-  // If not found, try by MongoDB _id
-  if (!booking) {
-    booking = await Booking.findById(identifier);
-  }
-  
-  return booking;
-};
-
-/**
- * Get all bookings for admin (with filtering)
- */
-app.get('/api/admin/bookings', async (req, res) => {
+// Get all bookings for admin (with filtering)
+app.get('/api/admin/bookings', authenticateAdmin(), async (req, res) => {
   try {
     const { status, search, page = 1, limit = 20 } = req.query;
     
@@ -2212,10 +2076,386 @@ app.get('/api/admin/bookings', async (req, res) => {
   }
 });
 
-/**
- * Update booking status (admin actions)
- */
-app.put('/api/admin/bookings/:identifier/status', async (req, res) => {
+// Admin dashboard stats
+app.get('/api/admin/stats', authenticateAdmin(), async (req, res) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    
+    const monthAgo = new Date(today);
+    monthAgo.setDate(monthAgo.getDate() - 30);
+    
+    // Get counts by status
+    const statusCounts = await Booking.aggregate([
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+    
+    // Get today's pickups
+    const todaysPickups = await Booking.countDocuments({
+      pickupDate: { $gte: today, $lt: tomorrow },
+      status: { $in: ['confirmed', 'handed_over'] }
+    });
+    
+    // Get today's dropoffs
+    const todaysDropoffs = await Booking.countDocuments({
+      dropoffDate: { $gte: today, $lt: tomorrow },
+      status: { $in: ['handed_over', 'in_use'] }
+    });
+
+    const pendingBookingsCount = await Booking.countDocuments({
+      status: { $in: ['pending'] }
+    });
+    
+    // Get revenue stats
+    const revenueStats = await Booking.aggregate([
+      {
+        $match: {
+          paymentStatus: 'paid',
+          createdAt: { $gte: monthAgo }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalRevenue: { $sum: '$totalAmount' },
+          avgRevenue: { $avg: '$totalAmount' },
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+    
+    // Get recent bookings
+    const recentBookings = await Booking.find()
+      .sort({ createdAt: -1 })
+      .limit(5);
+    
+    // Convert status counts to object
+    const statusMap = {};
+    statusCounts.forEach(item => {
+      statusMap[item._id] = item.count;
+    });
+    
+    res.json({
+      success: true,
+      stats: {
+        totalBookings: await Booking.countDocuments(),
+        statusCounts: statusMap,
+        todaysPickups,
+        todaysDropoffs,
+        pendingBookingsCount,
+        totalRevenue: revenueStats[0]?.totalRevenue || 0,
+        avgBookingValue: revenueStats[0]?.avgRevenue || 0,
+        recentBookings: recentBookings.map(b => ({
+          bookingId: b.bookingId,
+          customerName: b.customerName,
+          vehicleName: b.vehicleName,
+          status: b.status,
+          totalAmount: b.totalAmount,
+          createdAt: b.createdAt
+        }))
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching admin stats:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get booking pipeline (for kanban view)
+app.get('/api/admin/bookings/pipeline', authenticateAdmin(), async (req, res) => {
+  try {
+    const bookings = await Booking.find()
+      .sort({ createdAt: -1 })
+      .limit(50);
+    
+    // Group by status
+    const pipeline = {
+      pending: bookings.filter(b => b.status === 'pending'),
+      confirmed: bookings.filter(b => b.status === 'confirmed'),
+      handed_over: bookings.filter(b => b.status === 'handed_over'),
+      in_use: bookings.filter(b => b.status === 'in_use'),
+      returned: bookings.filter(b => b.status === 'returned'),
+      completed: bookings.filter(b => b.status === 'completed'),
+      cancelled: bookings.filter(b => b.status === 'cancelled'),
+      overdue: bookings.filter(b => b.status === 'overdue')
+    };
+    
+    res.json({
+      success: true,
+      pipeline,
+      counts: {
+        pending: pipeline.pending.length,
+        confirmed: pipeline.confirmed.length,
+        handed_over: pipeline.handed_over.length,
+        in_use: pipeline.in_use.length,
+        returned: pipeline.returned.length,
+        completed: pipeline.completed.length,
+        cancelled: pipeline.cancelled.length,
+        overdue: pipeline.overdue.length
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching pipeline:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Admin payment processing endpoint
+app.post('/api/admin/bookings/:identifier/payment', authenticateAdmin(), async (req, res) => {
+  try {
+    const { identifier } = req.params;
+    const { 
+      paymentMethod = 'cash', 
+      paymentAmount, 
+      paymentStatus = 'paid',
+      transactionId,
+      paymentNotes,
+      processedBy = 'admin'
+    } = req.body;
+    
+    // Find booking by bookingId or _id
+    const booking = await findBooking(identifier);
+    
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        error: 'Booking not found'
+      });
+    }
+    
+    // Validate payment amount
+    if (paymentAmount && (paymentAmount > booking.totalAmount || paymentAmount <= 0)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid payment amount. Must be between 0 and ${booking.totalAmount}`
+      });
+    }
+    
+    // Update payment details
+    booking.paymentMethod = paymentMethod;
+    booking.paymentAmount = paymentAmount || booking.totalAmount;
+    booking.paymentStatus = paymentStatus;
+    booking.paymentTimestamp = new Date();
+    
+    // Add transaction ID if provided
+    if (transactionId) {
+      booking.razorpayPaymentId = transactionId;
+    }
+    
+    // If payment is completed, update booking status
+    if (paymentStatus === 'paid') {
+      booking.status = 'confirmed';
+      
+      // Add to status history
+      if (!booking.statusHistory) {
+        booking.statusHistory = [];
+      }
+      
+      booking.statusHistory.push({
+        status: 'confirmed',
+        timestamp: new Date(),
+        actionBy: processedBy,
+        notes: paymentNotes || `Payment processed via ${paymentMethod}`
+      });
+      
+      console.log(`✅ Payment processed for booking: ${booking.bookingId} - ${paymentMethod}: ₹${booking.paymentAmount}`);
+    }
+    
+    await booking.save();
+    
+    res.json({
+      success: true,
+      message: `Payment ${paymentStatus} successfully`,
+      booking: {
+        bookingId: booking.bookingId,
+        customerName: booking.customerName,
+        vehicleName: booking.vehicleName,
+        totalAmount: booking.totalAmount,
+        paymentAmount: booking.paymentAmount,
+        paymentMethod: booking.paymentMethod,
+        paymentStatus: booking.paymentStatus,
+        status: booking.status
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error processing payment:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Create manual booking (for admin panel)
+app.post('/api/admin/bookings/manual', authenticateAdmin(), async (req, res) => {
+  try {
+    console.log('📝 Creating manual booking:', req.body);
+    
+    const {
+      customerName,
+      customerPhone,
+      customerEmail,
+      driverLicense,
+      vehicleId,
+      vehicleName,
+      vehicleType,
+      dailyRate,
+      pickupDate,
+      dropoffDate,
+      pickupTime = '09:00',
+      dropoffTime = '18:00',
+      totalAmount,
+      advanceAmount = 0,
+      paymentMethod = 'cash',
+      paymentStatus = 'pending',
+      notes,
+      createdBy = 'admin',
+      manualBooking = true
+    } = req.body;
+    
+    // Validate required fields
+    if (!customerName || !customerPhone || !vehicleId || !vehicleName || !pickupDate || !dropoffDate) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: customerName, customerPhone, vehicleName, pickupDate, dropoffDate'
+      });
+    }
+    
+    // Check if vehicle exists
+    const vehicle = await Vehicle.findById(vehicleId);
+    if (!vehicle) {
+      return res.status(404).json({
+        success: false,
+        error: 'Vehicle not found'
+      });
+    }
+    
+    // Parse dates
+    const startDate = new Date(pickupDate);
+    const endDate = new Date(dropoffDate);
+    
+    // Validate dates
+    if (startDate >= endDate) {
+      return res.status(400).json({
+        success: false,
+        error: 'Drop-off date must be after pick-up date'
+      });
+    }
+    
+    // Check if vehicle is available for the dates
+    const availabilityCheck = await checkVehicleAvailability(vehicleId, startDate, endDate);
+    
+    if (!availabilityCheck.available) {
+      return res.status(400).json({
+        success: false,
+        error: `Vehicle is not available for the selected dates. Only ${availabilityCheck.availableQuantity} of ${vehicle.quantity} available.`,
+        availableQuantity: availabilityCheck.availableQuantity,
+        vehicleQuantity: vehicle.quantity
+      });
+    }
+    
+    // Calculate total days
+    const totalDays = Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24));
+    
+    // Calculate total amount if not provided
+    let calculatedTotalAmount = totalAmount;
+    if (!calculatedTotalAmount && dailyRate) {
+      calculatedTotalAmount = dailyRate * totalDays;
+    } else if (!calculatedTotalAmount) {
+      calculatedTotalAmount = vehicle.dailyRate * totalDays;
+    }
+    
+    // Generate booking ID
+    const bookingId = `MB${Date.now()}${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
+    
+    // Create manual booking
+    const booking = new Booking({
+      bookingId,
+      customerName,
+      customerPhone,
+      customerEmail,
+      driverLicense,
+      vehicleId,
+      vehicleName,
+      vehicleType: vehicleType || vehicle.type,
+      dailyRate: dailyRate || vehicle.dailyRate,
+      pickupDate: startDate,
+      dropoffDate: endDate,
+      pickupTime,
+      dropoffTime,
+      totalDays,
+      rentalAmount: calculatedTotalAmount,
+      totalAmount: calculatedTotalAmount,
+      advanceAmount,
+      paymentMethod,
+      paymentStatus,
+      notes,
+      manualBooking: true,
+      createdBy,
+      status: paymentStatus === 'paid' ? 'confirmed' : 'pending',
+      notificationsSent: false,
+      notificationsStatus: 'pending',
+      statusHistory: [{
+        status: paymentStatus === 'paid' ? 'confirmed' : 'pending',
+        timestamp: new Date(),
+        actionBy: createdBy,
+        notes: 'Manual booking created'
+      }]
+    });
+    
+    await booking.save();
+    
+    console.log(`✅ Manual booking created: ${bookingId} for ${customerName}`);
+    
+    res.json({
+      success: true,
+      message: 'Manual booking created successfully',
+      bookingId: booking.bookingId,
+      booking: {
+        _id: booking._id,
+        bookingId: booking.bookingId,
+        customerName: booking.customerName,
+        customerPhone: booking.customerPhone,
+        vehicleName: booking.vehicleName,
+        pickupDate: booking.pickupDate,
+        dropoffDate: booking.dropoffDate,
+        totalAmount: booking.totalAmount,
+        paymentStatus: booking.paymentStatus,
+        status: booking.status,
+        createdBy: booking.createdBy,
+        createdAt: booking.createdAt
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error creating manual booking:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+// Update booking status (admin actions)
+app.put('/api/admin/bookings/:identifier/status', authenticateAdmin(), async (req, res) => {
   try {
     const { identifier } = req.params;
     const { status, notes, actionBy } = req.body;
@@ -2243,7 +2483,7 @@ app.put('/api/admin/bookings/:identifier/status', async (req, res) => {
       'in_use': ['returned', 'overdue'],
       'returned': ['completed'],
       'overdue': ['returned', 'completed'],
-      'cancelled': [] // Can't change from cancelled
+      'cancelled': []
     };
     
     if (!validTransitions[booking.status]?.includes(status)) {
@@ -2294,10 +2534,8 @@ app.put('/api/admin/bookings/:identifier/status', async (req, res) => {
   }
 });
 
-/**
- * Cancel booking (admin)
- */
-app.post('/api/admin/bookings/:identifier/cancel', async (req, res) => {
+// Cancel booking (admin)
+app.post('/api/admin/bookings/:identifier/cancel', authenticateAdmin(), async (req, res) => {
   try {
     const { identifier } = req.params;
     const { reason, refundAmount, actionBy } = req.body;
@@ -2359,10 +2597,8 @@ app.post('/api/admin/bookings/:identifier/cancel', async (req, res) => {
   }
 });
 
-/**
- * Hand over vehicle to customer
- */
-app.post('/api/admin/bookings/:identifier/handover', async (req, res) => {
+// Hand over vehicle to customer
+app.post('/api/admin/bookings/:identifier/handover', authenticateAdmin(), async (req, res) => {
   try {
     const { identifier } = req.params;
     const { 
@@ -2435,13 +2671,8 @@ app.post('/api/admin/bookings/:identifier/handover', async (req, res) => {
   }
 });
 
-/**
- * Return vehicle from customer
- */
-/**
- * Return vehicle from customer
- */
-app.post('/api/admin/bookings/:identifier/return', async (req, res) => {
+// Return vehicle from customer
+app.post('/api/admin/bookings/:identifier/return', authenticateAdmin(), async (req, res) => {
   try {
     const { identifier } = req.params;
     const { 
@@ -2482,7 +2713,7 @@ app.post('/api/admin/bookings/:identifier/return', async (req, res) => {
     
     // Calculate fuel charges if fuel level is provided
     if (fuelLevel && booking.handoverData && booking.handoverData.fuelLevel) {
-      const fuelChargePerLevel = 500; // Example: ₹500 per fuel level difference
+      const fuelChargePerLevel = 500;
       const handoverFuelLevel = booking.handoverData.fuelLevel;
       
       // Convert fuel levels to numerical values for calculation
@@ -2499,7 +2730,7 @@ app.post('/api/admin/bookings/:identifier/return', async (req, res) => {
       
       if (returnLevel < handoverLevel) {
         const fuelDifference = handoverLevel - returnLevel;
-        const fuelCharge = (fuelDifference / 100) * 4 * fuelChargePerLevel; // Assuming 4 fuel levels total
+        const fuelCharge = (fuelDifference / 100) * 4 * fuelChargePerLevel;
         
         charges.push({
           type: 'fuel_replacement',
@@ -2513,11 +2744,11 @@ app.post('/api/admin/bookings/:identifier/return', async (req, res) => {
     
     // Calculate late return charges if applicable
     const now = new Date();
-    const scheduledReturnDate = new Date(booking.endDate);
+    const scheduledReturnDate = new Date(booking.dropoffDate);
     
     if (now > scheduledReturnDate) {
       const hoursLate = Math.ceil((now - scheduledReturnDate) / (1000 * 60 * 60));
-      const lateChargePerHour = 200; // Example: ₹200 per hour
+      const lateChargePerHour = 200;
       const lateCharge = hoursLate * lateChargePerHour;
       
       charges.push({
@@ -2533,11 +2764,11 @@ app.post('/api/admin/bookings/:identifier/return', async (req, res) => {
     if (odometerReading && booking.handoverData && booking.handoverData.odometerReading) {
       const startOdometer = booking.handoverData.odometerReading;
       const endOdometer = odometerReading;
-      const allowedKms = (booking.durationDays || 1) * 300; // Example: 300 km per day
+      const allowedKms = (booking.totalDays || 1) * 300;
       const extraKms = Math.max(0, endOdometer - startOdometer - allowedKms);
       
       if (extraKms > 0) {
-        const kmCharge = extraKms * 10; // Example: ₹10 per extra km
+        const kmCharge = extraKms * 10;
         
         charges.push({
           type: 'extra_kilometers',
@@ -2551,7 +2782,7 @@ app.post('/api/admin/bookings/:identifier/return', async (req, res) => {
     
     // Check for damage charges based on condition notes
     if (conditionNotes && conditionNotes.toLowerCase().includes('damage')) {
-      const damageCharge = 2000; // Example: ₹2000 for damage
+      const damageCharge = 2000;
       
       charges.push({
         type: 'damage_charge',
@@ -2569,8 +2800,8 @@ app.post('/api/admin/bookings/:identifier/return', async (req, res) => {
       fuelLevel: fuelLevel || 'full',
       conditionNotes: conditionNotes || 'Good condition',
       returnStatus: returnStatus || 'good',
-      additionalCharges: charges, // Use the calculated charges array
-      totalAdditionalCharges: totalAdditionalCharges, // Use the calculated total
+      additionalCharges: charges,
+      totalAdditionalCharges: totalAdditionalCharges,
       notes: notes || '',
       returnedBy: returnedBy || 'admin',
       returnedAt: new Date()
@@ -2615,10 +2846,9 @@ app.post('/api/admin/bookings/:identifier/return', async (req, res) => {
     });
   }
 });
-/**
- * Complete booking (after return)
- */
-app.post('/api/admin/bookings/:identifier/complete', async (req, res) => {
+
+// Complete booking (after return)
+app.post('/api/admin/bookings/:identifier/complete', authenticateAdmin(), async (req, res) => {
   try {
     const { identifier } = req.params;
     const { finalNotes, completedBy } = req.body;
@@ -2685,84 +2915,23 @@ app.post('/api/admin/bookings/:identifier/complete', async (req, res) => {
   }
 });
 
-/**
- * Get booking pipeline (for kanban view)
- */
-app.get('/api/admin/bookings/pipeline', async (req, res) => {
+// Fix vehicle quantity field for existing vehicles
+app.post('/api/admin/fix-vehicle-quantity', authenticateAdmin(), async (req, res) => {
   try {
-    const bookings = await Booking.find()
-      .sort({ createdAt: -1 })
-      .limit(50);
-    
-    // Group by status
-    const pipeline = {
-      pending: bookings.filter(b => b.status === 'pending'),
-      confirmed: bookings.filter(b => b.status === 'confirmed'),
-      handed_over: bookings.filter(b => b.status === 'handed_over'),
-      in_use: bookings.filter(b => b.status === 'in_use'),
-      returned: bookings.filter(b => b.status === 'returned'),
-      completed: bookings.filter(b => b.status === 'completed'),
-      cancelled: bookings.filter(b => b.status === 'cancelled'),
-      overdue: bookings.filter(b => b.status === 'overdue')
-    };
+    // Add quantity field to all vehicles that don't have it
+    const result = await Vehicle.updateMany(
+      { quantity: { $exists: false } },
+      { $set: { quantity: 1 } }
+    );
     
     res.json({
       success: true,
-      pipeline,
-      counts: {
-        pending: pipeline.pending.length,
-        confirmed: pipeline.confirmed.length,
-        handed_over: pipeline.handed_over.length,
-        in_use: pipeline.in_use.length,
-        returned: pipeline.returned.length,
-        completed: pipeline.completed.length,
-        cancelled: pipeline.cancelled.length,
-        overdue: pipeline.overdue.length
-      }
+      message: `Updated ${result.modifiedCount} vehicles with quantity field`,
+      modifiedCount: result.modifiedCount
     });
-    
   } catch (error) {
-    console.error('Error fetching pipeline:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
-});
-
-// Helper function for fuel charges
-function calculateFuelCharge(startLevel, endLevel) {
-  const fuelPrices = {
-    'empty': 3000, // Full tank price
-    'quarter': 2250,
-    'half': 1500,
-    'three_quarter': 750,
-    'full': 0
-  };
-  
-  const startPrice = fuelPrices[startLevel] || 0;
-  const endPrice = fuelPrices[endLevel] || 0;
-  
-  return Math.max(0, startPrice - endPrice);
-}
-
-// Test endpoint
-app.get('/api/test', (req, res) => {
-  res.json({ 
-    success: true, 
-    message: 'API is working',
-    endpoints: {
-      createOrder: 'POST /api/create-razorpay-order',
-      verifyPayment: 'POST /api/verify-payment',
-      sendNotifications: 'POST /api/bookings/:id/notify',
-      testNotifications: 'POST /api/bookings/:id/test-notify',
-      manualNotifications: 'POST /api/notifications/send-manual',
-      checkAvailability: 'POST /api/vehicles/availability',
-      vehicleAvailability: 'POST /api/vehicles/:id/availability',
-      adminBookings: 'GET /api/admin/bookings',
-      adminStats: 'GET /api/admin/stats'
-    }
-  });
 });
 
 // ==================== ERROR HANDLING ====================
@@ -2773,7 +2942,8 @@ app.use((req, res) => {
     success: false,
     error: 'Endpoint not found',
     path: req.originalUrl,
-    method: req.method
+    method: req.method,
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -2783,7 +2953,8 @@ app.use((err, req, res, next) => {
   res.status(500).json({
     success: false,
     error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
+    message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong',
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -2794,28 +2965,46 @@ app.listen(PORT, () => {
     🌐 http://localhost:${PORT}
     📅 ${new Date().toLocaleString()}
     
-    💰 Razorpay Order Endpoint: POST /api/create-razorpay-order
-    🔐 Payment Verify Endpoint: POST /api/verify-payment
-    📧 Notification Endpoint: POST /api/bookings/:id/notify
+    🔐 ADMIN AUTHENTICATION:
+    • Setup: POST /api/admin/setup
+    • Login: POST /api/admin/auth/login
+    • Verify: GET /api/admin/auth/verify
+    • Profile: GET /api/admin/auth/profile
     
-    🚗 Availability Endpoints:
-    • POST /api/vehicles/availability - Check all vehicles
-    • POST /api/vehicles/:id/availability - Check specific vehicle
-    • GET /api/vehicles/:id/unavailable-dates - Get unavailable dates
+    💰 PAYMENT SYSTEM:
+    • Create Order: POST /api/create-razorpay-order
+    • Verify: POST /api/verify-payment
     
-    👨‍💼 Admin Endpoints:
-    • GET /api/admin/bookings - Get all bookings with filters
-    • GET /api/admin/stats - Get dashboard statistics
-    • PUT /api/admin/bookings/:id/status - Update booking status
-    • POST /api/admin/bookings/manual - Create manual booking
-    • POST /api/admin/bookings/:id/handover - Hand over vehicle
-    • POST /api/admin/bookings/:id/return - Return vehicle
-    • POST /api/admin/bookings/:id/complete - Complete booking
+    📧 NOTIFICATIONS:
+    • Send: POST /api/bookings/:id/notify
+    • Test: POST /api/test-notify
+    • Config: GET /api/notifications/config
     
-    📊 API Status: http://localhost:${PORT}/api/health
-    ⚙️ Notification Config: http://localhost:${PORT}/api/notifications/config
+    🚗 VEHICLES:
+    • All: GET /api/vehicles
+    • Available: GET /api/vehicles/available
+    • Availability: POST /api/vehicles/availability
+    • Unavailable Dates: GET /api/vehicles/:id/unavailable-dates
     
-    Test with: curl http://localhost:${PORT}/api/health
-    Test admin: curl http://localhost:${PORT}/api/admin/stats
+    📋 BOOKINGS:
+    • Create: POST /api/bookings
+    • Get by ID: GET /api/bookings/:id
+    • All: GET /api/bookings
+    
+    👨‍💼 ADMIN PANEL:
+    • All Bookings: GET /api/admin/bookings
+    • Stats: GET /api/admin/stats
+    • Pipeline: GET /api/admin/bookings/pipeline
+    • Manual Booking: POST /api/admin/bookings/manual
+    • Handover: POST /api/admin/bookings/:id/handover
+    • Return: POST /api/admin/bookings/:id/return
+    • Complete: POST /api/admin/bookings/:id/complete
+    
+    📊 SYSTEM:
+    • Health: GET /api/health
+    • Test: GET /api/test
+    • Debug: GET /api/debug/vehicle/:id
+    
+    ✅ API Status: http://localhost:${PORT}/api/health
   `);
 });
